@@ -1,0 +1,28 @@
+{
+  "name": "nft-lend-auction",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "npx hardhat test",
+    "deploy": "npx hardhat run scripts/deploy.js --network core"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "devDependencies": {
+    "@nomiclabs/hardhat-ethers": "2.2.3",
+    "@nomiclabs/hardhat-etherscan": "3.1.8",
+    "chai": "^4.5.0",
+    "dotenv": "^16.4.7",
+    "ethers": "^5.7.2",
+    "hardhat": "2.22.17",
+    "mocha": "^10.8.2"
+  },
+  "dependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^2.0.2",
+    "@nomicfoundation/hardhat-verify": "^2.0.12",
+    "@nomiclabs/hardhat-waffle": "^2.0.6",
+    "@openzeppelin/contracts": "^5.1.0"
+  }
+}
