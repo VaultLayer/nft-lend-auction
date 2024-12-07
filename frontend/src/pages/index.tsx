@@ -193,7 +193,22 @@ export default function Home() {
                     ...transactionData,
                     gasLimit: gasEstimate,
                 });
-                await tx.wait();
+                const receipt = await tx.wait();
+
+                // Extract LoanId from the LoanListed event
+                const loanListedEvent = receipt.logs.find(log =>
+                    log.topics[0] === ethers.utils.id("LoanListed(uint256,(address,address,address,uint256,uint256,uint256,uint256,uint256,bool))")
+                );
+
+                if (!loanListedEvent) {
+                    throw new Error("LoanListed event not found in transaction receipt");
+                }
+
+                const loanId = ethers.BigNumber.from(loanListedEvent.topics[1]).toNumber();
+
+                console.log("New Loan ID:", loanId);
+                alert(`Loan successfully listed with Loan ID: ${loanId}`);
+                
             } catch (error) {
                 if (error.code === ethers.errors.CALL_EXCEPTION) {
                     console.error("Revert reason:", error.reason || error.data || "Unknown");
@@ -263,11 +278,23 @@ export default function Home() {
             const loanAmount = ethers.BigNumber.from(loan.loanAmount);
             const currentInterestRate = ethers.BigNumber.from(loan.currentInterestRate);
     
-            // Calculate repayment amount (what the borrower needs to send)
-            const repaymentAmount = loanAmount.add(loanAmount.mul(currentInterestRate).div(10000));
+            // Fetch protocol fee rate
+            const protocolFeeRate = await contract.protocolFeeRate(); // In bps
+    
+            // Calculate repayment amount
+            const interestAmount = loanAmount.mul(currentInterestRate).div(10000); // Interest = loanAmount * rate / 10000
+            const totalRepayment = loanAmount.add(interestAmount); // Total repayment = principal + interest
+            const borrowerProtocolFee = totalRepayment.mul(Number(protocolFeeRate)).div(10000); // Borrower's protocol fee
+            const repaymentAmount = totalRepayment.add(borrowerProtocolFee); // Total payment required from borrower
     
             // Inform the user about the repayment amount
-            if (!window.confirm(`You will repay ${ethers.utils.formatEther(repaymentAmount)} $CORE. Proceed?`)) {
+            if (
+                !window.confirm(
+                    `You will repay ${ethers.utils.formatEther(repaymentAmount)} $CORE, including a protocol fee of ${ethers.utils.formatEther(
+                        borrowerProtocolFee
+                    )} $CORE. Proceed?`
+                )
+            ) {
                 return;
             }
     
@@ -281,7 +308,45 @@ export default function Home() {
         }
     };
     
+    const handleClaimDefaultedLoan = async (loanId: number) => {
+        try {
+            if (!signer) return;
     
+            const contract = getContract(signer);
+    
+            // Fetch loan details
+            const loan = await contract.loans(loanId);
+            const loanAmount = ethers.BigNumber.from(loan.loanAmount);
+            const currentInterestRate = ethers.BigNumber.from(loan.currentInterestRate);
+    
+            // Fetch protocol fee rate
+            const protocolFeeRate = await contract.protocolFeeRate(); // In bps
+    
+            // Calculate hypothetical repayment amount
+            const interestAmount = loanAmount.mul(currentInterestRate).div(10000); // Interest = loanAmount * rate / 10000
+            const totalRepayment = loanAmount.add(interestAmount); // Total repayment = principal + interest
+            const lenderProtocolFee = totalRepayment.mul(protocolFeeRate).div(10000); // Lender's protocol fee
+    
+            // Inform the user about the protocol fee required
+            if (
+                !window.confirm(
+                    `To claim the defaulted collateral, you will pay a protocol fee of ${ethers.utils.formatEther(
+                        lenderProtocolFee
+                    )} $CORE. Proceed?`
+                )
+            ) {
+                return;
+            }
+    
+            // Execute the claim transaction
+            const tx = await contract.claimDefaultedLoan(loanId, { value: lenderProtocolFee });
+            await tx.wait();
+    
+            fetchLoans();
+        } catch (error) {
+            console.error("Error claiming defaulted loan:", error);
+        }
+    };
 
     const handlePlaceBid = async (loanId: number) => {
         try {
@@ -462,6 +527,11 @@ export default function Home() {
                             {loan.lender.toLowerCase() === walletAddress?.toLowerCase() && !loan.isAccepted && (
                                 <Button variant="outlined" color="error" onClick={() => handleCancelBid(loan.id)}>
                                     Cancel Bid
+                                </Button>
+                            )}
+                            {loan.lender.toLowerCase() === walletAddress?.toLowerCase() && loan.isAccepted && (
+                                <Button variant="outlined" color="error" onClick={() => handleClaimDefaultedLoan(loan.id)}>
+                                    Claim Defaulted
                                 </Button>
                             )}
                         </CardActions>

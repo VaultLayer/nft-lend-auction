@@ -32,7 +32,7 @@ contract NFTLendAuction is ReentrancyGuard, Ownable {
     uint256[] public activeLoanIds; // List of IDs for currently active loans
     mapping(uint256 => bool) public activeLoans; // Tracks whether a loan ID is active
 
-    uint256 public protocolFeeRate = 500; // Protocol fee rate in basis points (5%)
+    uint256 public protocolFeeRate = 200; // Protocol fee rate in basis points (5%)
     uint256 public protocolFeeBalance; // Accumulated protocol fees
 
 
@@ -211,14 +211,34 @@ contract NFTLendAuction is ReentrancyGuard, Ownable {
         loan.startTime = block.timestamp;
 
         uint256 loanAmount = escrowedFunds[loanId];
-        uint256 protocolFee = (loanAmount * protocolFeeRate) / 10000;
-        uint256 amountAfterFee = loanAmount - protocolFee;
-
-        protocolFeeBalance += protocolFee;
         escrowedFunds[loanId] = 0;
-        payable(loan.borrower).transfer(amountAfterFee);
+        payable(loan.borrower).transfer(loanAmount);
 
         emit LoanAccepted(loanId, loan);
+    }
+
+    /**
+     * @notice Get the total required repayment for a loan.
+     * @param loanId ID of the loan to repay.
+     */
+    function getRequiredRepayment(uint256 loanId) 
+        public 
+        view 
+        loanExists(loanId) 
+        returns (uint256)
+    {
+        Loan storage loan = loans[loanId];
+        require(loan.isAccepted, "Loan not accepted yet");
+
+        // Calculate total repayment: principal + interest
+        uint256 interestAmount = (loan.loanAmount * loan.currentInterestRate) / 10000;
+        uint256 totalRepayment = loan.loanAmount + interestAmount;
+
+        // Calculate borrower protocol fee
+        uint256 borrowerProtocolFee = (totalRepayment * protocolFeeRate) / 10000;
+
+        // Return the required payment: total repayment + borrower protocol fee
+        return totalRepayment + borrowerProtocolFee;
     }
 
     /**
@@ -236,19 +256,27 @@ contract NFTLendAuction is ReentrancyGuard, Ownable {
         require(loan.isAccepted, "Loan not accepted yet");
         require(block.timestamp <= loan.startTime + loan.duration, "Loan duration expired");
 
-        uint256 repaymentAmount = loan.loanAmount +
-            ((loan.loanAmount * loan.currentInterestRate) / 10000);
+        uint256 requiredPayment = getRequiredRepayment(loanId);
+        require(msg.value == requiredPayment, "Incorrect repayment amount");
 
-        require(msg.value == repaymentAmount, "Incorrect repayment amount");
+        // Calculate total repayment: principal + interest
+        uint256 interestAmount = (loan.loanAmount * loan.currentInterestRate) / 10000;
+        uint256 totalRepayment = loan.loanAmount + interestAmount;
 
-        uint256 protocolFee = (repaymentAmount * protocolFeeRate) / 10000;
-        uint256 amountAfterFee = repaymentAmount - protocolFee;
+        // Calculate lender protocol fee
+        uint256 lenderProtocolFee = (totalRepayment * protocolFeeRate) / 10000;
+        uint256 lenderPayout = totalRepayment - lenderProtocolFee;
 
-        protocolFeeBalance += protocolFee;
+        // Update protocol fee balance
+        uint256 borrowerProtocolFee = (totalRepayment * protocolFeeRate) / 10000;
+        protocolFeeBalance += (borrowerProtocolFee + lenderProtocolFee);
+
+        // Transfer NFT back to borrower
         loan.isAccepted = false;
-
         IERC721(loan.nftAddress).transferFrom(address(this), loan.borrower, loan.tokenId);
-        payable(loan.lender).transfer(amountAfterFee);
+
+        // Transfer lender payout
+        payable(loan.lender).transfer(lenderPayout);
 
         emit LoanRepaid(loanId, loan);
 
@@ -282,6 +310,7 @@ contract NFTLendAuction is ReentrancyGuard, Ownable {
      */
     function claimDefaultedLoan(uint256 loanId)
         external
+        payable
         nonReentrant
         loanExists(loanId)
     {
@@ -289,14 +318,28 @@ contract NFTLendAuction is ReentrancyGuard, Ownable {
         require(loan.isAccepted, "Loan not accepted");
         require(block.timestamp > loan.startTime + loan.duration, "Loan not expired");
 
-        loan.isAccepted = false;
+        // Calculate the hypothetical repayment amount
+        uint256 interestAmount = (loan.loanAmount * loan.currentInterestRate) / 10000;
+        uint256 totalRepayment = loan.loanAmount + interestAmount;
 
+        // Calculate the lender's protocol fee
+        uint256 lenderProtocolFee = (totalRepayment * protocolFeeRate) / 10000;
+
+        // Ensure the lender sends the required protocol fee
+        require(msg.value == lenderProtocolFee, "Incorrect protocol fee sent");
+
+        // Update protocol fee balance
+        protocolFeeBalance += lenderProtocolFee;
+
+        // Transfer NFT to the lender
+        loan.isAccepted = false;
         IERC721(loan.nftAddress).transferFrom(address(this), loan.lender, loan.tokenId);
 
         emit LoanDefaulted(loanId, loan);
 
         _removeActiveLoan(loanId);
     }
+
 
     /**
      * @notice Returns the IDs of all active loans.
