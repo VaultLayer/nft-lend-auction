@@ -32,6 +32,10 @@ contract NFTLendAuction is ReentrancyGuard, Ownable {
     uint256[] public activeLoanIds; // List of IDs for currently active loans
     mapping(uint256 => bool) public activeLoans; // Tracks whether a loan ID is active
 
+    uint256 public protocolFeeRate = 500; // Protocol fee rate in basis points (5%)
+    uint256 public protocolFeeBalance; // Accumulated protocol fees
+
+
     // Events
     event LoanListed(uint256 loanId, Loan loan);
     event LoanDelisted(uint256 loanId, Loan loan); 
@@ -41,6 +45,8 @@ contract NFTLendAuction is ReentrancyGuard, Ownable {
     event LoanRepaid(uint256 loanId, Loan loan);
     event LoanDefaulted(uint256 loanId, Loan loan);
     event AllowedNFTUpdated(address nftAddress, bool allowed);
+    event ProtocolFeeRateUpdated(uint256 newFeeRate);
+    event ProtocolFeesWithdrawn(address to, uint256 amount);
 
     // Modifiers
     modifier onlyBorrower(uint256 loanId) {
@@ -76,6 +82,16 @@ contract NFTLendAuction is ReentrancyGuard, Ownable {
     function updateAllowedNFT(address nftAddress, bool allowed) external onlyOwner {
         allowedNFTs[nftAddress] = allowed;
         emit AllowedNFTUpdated(nftAddress, allowed);
+    }
+
+    /**
+     * @notice Sets the protocol fee rate.
+     * @param newFeeRate New protocol fee rate in basis points.
+     */
+    function setProtocolFeeRate(uint256 newFeeRate) external onlyOwner {
+        require(newFeeRate <= 1000, "Fee rate too high"); // Max 10%
+        protocolFeeRate = newFeeRate;
+        emit ProtocolFeeRateUpdated(newFeeRate);
     }
 
     /**
@@ -195,8 +211,12 @@ contract NFTLendAuction is ReentrancyGuard, Ownable {
         loan.startTime = block.timestamp;
 
         uint256 loanAmount = escrowedFunds[loanId];
+        uint256 protocolFee = (loanAmount * protocolFeeRate) / 10000;
+        uint256 amountAfterFee = loanAmount - protocolFee;
+
+        protocolFeeBalance += protocolFee;
         escrowedFunds[loanId] = 0;
-        payable(loan.borrower).transfer(loanAmount);
+        payable(loan.borrower).transfer(amountAfterFee);
 
         emit LoanAccepted(loanId, loan);
     }
@@ -221,11 +241,14 @@ contract NFTLendAuction is ReentrancyGuard, Ownable {
 
         require(msg.value == repaymentAmount, "Incorrect repayment amount");
 
+        uint256 protocolFee = (repaymentAmount * protocolFeeRate) / 10000;
+        uint256 amountAfterFee = repaymentAmount - protocolFee;
+
+        protocolFeeBalance += protocolFee;
         loan.isAccepted = false;
 
         IERC721(loan.nftAddress).transferFrom(address(this), loan.borrower, loan.tokenId);
-
-        payable(loan.lender).transfer(msg.value);
+        payable(loan.lender).transfer(amountAfterFee);
 
         emit LoanRepaid(loanId, loan);
 
@@ -296,4 +319,16 @@ contract NFTLendAuction is ReentrancyGuard, Ownable {
             }
         }
     }
+
+    /**
+    * @notice Withdraws accumulated protocol fees to the specified address.
+    * @param to Address to receive the fees.
+    */
+    function withdrawProtocolFees(address payable to) external onlyOwner nonReentrant {
+        uint256 amount = protocolFeeBalance;
+        protocolFeeBalance = 0;
+        to.transfer(amount);
+        emit ProtocolFeesWithdrawn(to, amount);
+    }
+
 }

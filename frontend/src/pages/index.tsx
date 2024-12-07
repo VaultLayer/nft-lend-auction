@@ -44,9 +44,19 @@ export default function Home() {
     });
     const [openModal, setOpenModal] = useState(false);
 
+    const calculateLenderAmount = (loanAmount: string, currentInterestRate: string) => {
+        const protocolFeeRate = 5;
+        const loan = ethers.utils.parseEther(loanAmount);
+        const interest = loan.mul(Number(currentInterestRate)).div(10000);
+        const repaymentAmount = loan.add(interest);
+        const protocolFee = repaymentAmount.mul(protocolFeeRate).div(10000);
+        return ethers.utils.formatEther(repaymentAmount.sub(protocolFee));
+    };
+
     const fetchLoans = async () => {
         try {
-            const provider = new ethers.providers.Web3Provider((window as any).ethereum);
+            // Use the RPC provider instead of a signer
+            const provider = new ethers.providers.JsonRpcProvider(process.env.NEXT_PUBLIC_RPC_URL);
             const contract = getContract(provider);
     
             // Fetch active loan IDs
@@ -97,8 +107,12 @@ export default function Home() {
             console.error("Error fetching loans:", error);
         }
     };
-    
 
+    useEffect(() => {
+        fetchLoans();
+    }, []); // Fetch loans when the component mounts
+  
+    
     const connectWallet = async () => {
         try {
             const provider = new ethers.providers.Web3Provider((window as any).ethereum);
@@ -107,7 +121,6 @@ export default function Home() {
             const address = await signer.getAddress();
             setSigner(signer);
             setWalletAddress(address);
-            fetchLoans();
         } catch (error) {
             console.error("Error connecting wallet:", error);
         }
@@ -211,11 +224,28 @@ export default function Home() {
     const handleAcceptLoan = async (loanId: number) => {
         try {
             if (!signer) return;
-
+    
             const contract = getContract(signer);
+    
+            // Fetch loan details
+            const loan = await contract.loans(loanId);
+            const loanAmount = ethers.BigNumber.from(loan.loanAmount);
+    
+            // Fetch protocol fee rate
+            const protocolFeeRate = await contract.protocolFeeRate(); // In bps
+            const protocolFee = loanAmount.mul(protocolFeeRate).div(10000);
+    
+            // Calculate expected borrower amount after fee deduction
+            const expectedBorrowerAmount = loanAmount.sub(protocolFee);
+    
+            if (!window.confirm(`You will receive ${ethers.utils.formatEther(expectedBorrowerAmount)} $CORE after protocol fee deduction. Proceed?`)) {
+                return;
+            }
+    
+            // Execute transaction
             const tx = await contract.acceptLoan(loanId);
             await tx.wait();
-
+    
             fetchLoans();
         } catch (error) {
             console.error("Error accepting loan:", error);
@@ -228,23 +258,21 @@ export default function Home() {
     
             const contract = getContract(signer);
     
-            // Fetch the loan details to calculate the repayment amount
+            // Fetch loan details
             const loan = await contract.loans(loanId);
-    
             const loanAmount = ethers.BigNumber.from(loan.loanAmount);
             const currentInterestRate = ethers.BigNumber.from(loan.currentInterestRate);
     
-            // Calculate repayment amount: loanAmount + (loanAmount * currentInterestRate / 10000)
-            const repaymentAmount = loanAmount.add(
-                loanAmount.mul(currentInterestRate).div(10000)
-            );
+            // Calculate repayment amount (what the borrower needs to send)
+            const repaymentAmount = loanAmount.add(loanAmount.mul(currentInterestRate).div(10000));
     
-            console.log(`Repayment Amount for Loan ${loanId}:`, ethers.utils.formatEther(repaymentAmount));
+            // Inform the user about the repayment amount
+            if (!window.confirm(`You will repay ${ethers.utils.formatEther(repaymentAmount)} $CORE. Proceed?`)) {
+                return;
+            }
     
-            // Call repayLoan with the calculated amount
-            const tx = await contract.repayLoan(loanId, {
-                value: repaymentAmount,
-            });
+            // Execute the repayment transaction
+            const tx = await contract.repayLoan(loanId, { value: repaymentAmount });
             await tx.wait();
     
             fetchLoans();
@@ -252,6 +280,7 @@ export default function Home() {
             console.error("Error repaying loan:", error);
         }
     };
+    
     
 
     const handlePlaceBid = async (loanId: number) => {
@@ -391,6 +420,10 @@ export default function Home() {
                             <Typography>Loan Amount: {loan.loanAmount} $CORE</Typography>
                             <Typography>Max Interest Rate: {loan.maxInterestRate}%</Typography>
                             <Typography>Current Interest Rate: {loan.currentInterestRate}%</Typography>
+                            <Typography>
+                                Lender Receives After Protocol Fee:{" "}
+                                {calculateLenderAmount(loan.loanAmount, loan.currentInterestRate)} $CORE
+                            </Typography>
                             <Typography>Duration: {loan.duration} days</Typography>
                             <Typography>Start Time: {loan.startTime}</Typography>
                             <Typography>End Time: {loan.endTime}</Typography>

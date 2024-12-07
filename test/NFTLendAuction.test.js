@@ -102,8 +102,9 @@ describe("NFTLendAuction", function () {
     expect(lenderBalanceAfter).to.be.above(lenderBalanceBefore);
   });
 
-  it("should transfer escrow amount to borrower upon loan acceptance", async function () {
+  it("should transfer escrow amount minus protocol fee to borrower upon loan acceptance", async function () {
     const loanAmount = ethers.utils.parseEther("10");
+    const protocolFeeRate = await nftLendAuction.protocolFeeRate(); // Default 5%
 
     await nftContract.connect(borrower).approve(nftLendAuction.address, 1);
     await nftLendAuction
@@ -113,22 +114,47 @@ describe("NFTLendAuction", function () {
     // Lender places a bid
     await nftLendAuction.connect(lender1).placeBid(0, 800, { value: loanAmount });
 
+    // Calculate protocol fee and expected borrower amount
+    const protocolFee = loanAmount.mul(protocolFeeRate).div(10000);
+    const expectedBorrowerAmount = loanAmount.sub(protocolFee);
+
+    // Log values for debugging
+    //console.log("Loan Amount:", loanAmount.toString());
+    //console.log("Protocol Fee Rate:", protocolFeeRate.toString());
+    //console.log("Protocol Fee:", protocolFee.toString());
+    //console.log("Expected Borrower Amount:", expectedBorrowerAmount.toString());
+
     // Track balances before acceptance
     const borrowerBalanceBefore = await ethers.provider.getBalance(borrower.address);
     const contractBalanceBefore = await ethers.provider.getBalance(nftLendAuction.address);
 
     // Borrower accepts the loan
-    await nftLendAuction.connect(borrower).acceptLoan(0);
-    const loan = await nftLendAuction.loans(0);
-    expect(loan.isAccepted).to.equal(true);
+    const tx = await nftLendAuction.connect(borrower).acceptLoan(0);
+    const receipt = await tx.wait();
+    const gasCost = receipt.gasUsed.mul(receipt.effectiveGasPrice);
 
-    // Validate fund transfer
     const borrowerBalanceAfter = await ethers.provider.getBalance(borrower.address);
     const contractBalanceAfter = await ethers.provider.getBalance(nftLendAuction.address);
 
-    expect(borrowerBalanceAfter).to.be.above(borrowerBalanceBefore); // Borrower receives funds
-    expect(contractBalanceAfter).to.equal(contractBalanceBefore.sub(loanAmount)); // Escrow amount is released
+    const protocolFeeBalance = await nftLendAuction.protocolFeeBalance();
+
+    // Log final balances for debugging
+    //console.log("Borrower Balance Before:", borrowerBalanceBefore.toString());
+    //console.log("Borrower Balance After:", borrowerBalanceAfter.toString());
+    //console.log("Protocol Fee Balance:", protocolFeeBalance.toString());
+    // Validate fund transfer
+    expect(borrowerBalanceAfter).to.equal(
+        borrowerBalanceBefore.add(expectedBorrowerAmount).sub(gasCost)
+    ); // Borrower receives funds minus gas costs
+  
+    expect(contractBalanceAfter).to.equal(
+      contractBalanceBefore.add(protocolFee).sub(loanAmount)
+    ); // Escrow amount is released
+
+    // Validate protocol fee balance
+    expect(protocolFeeBalance).to.equal(protocolFee);
   });
+
 
   it("should refund the previous bidder when a new bid is placed", async function () {
     const loanAmount = ethers.utils.parseEther("10");
@@ -317,5 +343,101 @@ describe("NFTLendAuction", function () {
     activeLoans = await nftLendAuction.getActiveLoans();
     expect(activeLoans.map((id) => id.toNumber())).to.be.empty;
   });
+
+  it("should deduct the protocol fee upon loan acceptance", async function () {
+    const loanAmount = ethers.utils.parseEther("10");
+    const protocolFeeRate = await nftLendAuction.protocolFeeRate(); // 5%
+
+    await nftContract.connect(borrower).approve(nftLendAuction.address, 1);
+    await nftLendAuction
+      .connect(borrower)
+      .listLoan(nftContract.address, 1, loanAmount, 1000, 604800);
+
+    await nftLendAuction.connect(lender1).placeBid(0, 800, { value: loanAmount });
+
+    const protocolFee = loanAmount.mul(protocolFeeRate).div(10000);
+    const expectedBorrowerAmount = loanAmount.sub(protocolFee);
+
+    const borrowerBalanceBefore = await ethers.provider.getBalance(borrower.address);
+    const tx = await nftLendAuction.connect(borrower).acceptLoan(0);
+    const receipt = await tx.wait();
+    const gasCost = receipt.gasUsed.mul(receipt.effectiveGasPrice);
+
+    const borrowerBalanceAfter = await ethers.provider.getBalance(borrower.address);
+
+    expect(borrowerBalanceAfter).to.equal(
+        borrowerBalanceBefore.add(expectedBorrowerAmount).sub(gasCost)
+    ); // Subtract gas costs
+  });
+
+
+  it("should deduct the protocol fee upon loan repayment", async function () {
+    const loanAmount = ethers.utils.parseEther("10");
+    const interestRate = 800; // 8% interest
+    const protocolFeeRate = await nftLendAuction.protocolFeeRate(); // 5%
+    const repaymentAmount = loanAmount.add(
+        loanAmount.mul(interestRate).div(10000)
+    );
+
+    const protocolFee = repaymentAmount.mul(protocolFeeRate).div(10000);
+    const expectedLenderAmount = repaymentAmount.sub(protocolFee);
+
+    await nftContract.connect(borrower).approve(nftLendAuction.address, 1);
+    await nftLendAuction
+      .connect(borrower)
+      .listLoan(nftContract.address, 1, loanAmount, 1000, 604800);
+
+    await nftLendAuction.connect(lender1).placeBid(0, 800, { value: loanAmount });
+    await nftLendAuction.connect(borrower).acceptLoan(0);
+
+    const lenderBalanceBefore = await ethers.provider.getBalance(lender1.address);
+
+    await nftLendAuction.connect(borrower).repayLoan(0, { value: repaymentAmount });
+
+    const lenderBalanceAfter = await ethers.provider.getBalance(lender1.address);
+
+    expect(lenderBalanceAfter).to.equal(
+        lenderBalanceBefore.add(expectedLenderAmount)
+    ); // Lender receives repayment minus protocol fee
+  });
+
+
+  it("should allow the owner to update the protocol fee rate", async function () {
+    const newFeeRate = 300; // 3%
+    await nftLendAuction.connect(owner).setProtocolFeeRate(newFeeRate);
+
+    const updatedFeeRate = await nftLendAuction.protocolFeeRate();
+    expect(updatedFeeRate).to.equal(newFeeRate);
+  });
+
+  it("should prevent non-owners from updating the protocol fee rate", async function () {
+    await expect(
+      nftLendAuction.connect(borrower).setProtocolFeeRate(300)
+    ).to.be.revertedWithCustomError(nftLendAuction, "OwnableUnauthorizedAccount");
+  });
+
+
+  it("should allow the owner to withdraw accumulated protocol fees", async function () {
+    const ownerBalanceBefore = await ethers.provider.getBalance(owner.address);
+    const protocolFeeBalance = await nftLendAuction.protocolFeeBalance();
+
+    const tx = await nftLendAuction.connect(owner).withdrawProtocolFees(owner.address);
+    const receipt = await tx.wait();
+    const gasCost = receipt.gasUsed.mul(receipt.effectiveGasPrice);
+
+    const ownerBalanceAfter = await ethers.provider.getBalance(owner.address);
+
+    expect(ownerBalanceAfter).to.equal(
+        ownerBalanceBefore.add(protocolFeeBalance).sub(gasCost)
+    ); // Account for gas costs
+  });
+
+
+  it("should prevent non-owners from withdrawing protocol fees", async function () {
+    await expect(
+      nftLendAuction.connect(borrower).withdrawProtocolFees(borrower.address)
+    ).to.be.revertedWithCustomError(nftLendAuction, "OwnableUnauthorizedAccount");
+  });
+
   
 });
