@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.23;
 
 import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
 
 /**
  * @title NFTLendAuction
@@ -11,7 +11,10 @@ import "@openzeppelin/contracts/access/Ownable.sol";
  *         Lenders compete to provide loans by bidding with lower interest rates.
  *         Loans can be repaid or claimed by lenders in case of default.
  */
-contract NFTLendAuction is ReentrancyGuard, Ownable {
+contract NFTLendAuction is ReentrancyGuard, AccessControl {
+    bytes32 public constant OWNER_ROLE = keccak256("OWNER_ROLE");
+    bytes32 public constant MANAGER_ROLE = keccak256("MANAGER_ROLE");
+
     struct Loan {
         address borrower;          // Borrower's address
         address lender;            // Current lender (bidder offering the lowest rate)
@@ -29,6 +32,8 @@ contract NFTLendAuction is ReentrancyGuard, Ownable {
     mapping(uint256 => Loan) public loans; // Mapping of loan IDs to loan details
     mapping(uint256 => uint256) public escrowedFunds; // Mapping of loan IDs to escrowed lender funds
     mapping(address => bool) public allowedNFTs; // Tracks which NFT contracts are allowed
+
+    uint256 public maxActiveLoans = 1000; // Default maximum size for active loans
     uint256[] public activeLoanIds; // List of IDs for currently active loans
     mapping(uint256 => bool) public activeLoans; // Tracks whether a loan ID is active
 
@@ -54,6 +59,16 @@ contract NFTLendAuction is ReentrancyGuard, Ownable {
         _;
     }
 
+    modifier onlyLender(uint256 loanId) {
+        require(msg.sender == loans[loanId].lender, "Not loan lender");
+        _;
+    }
+
+    modifier onlyNftOwner(address nftAddress, uint256 tokenId) {
+        require(IERC721(nftAddress).ownerOf(tokenId) == msg.sender, "Not NFT owner");
+        _;
+    }
+    
     modifier loanExists(uint256 loanId) {
         require(loans[loanId].borrower != address(0), "Loan does not exist");
         _;
@@ -72,23 +87,44 @@ contract NFTLendAuction is ReentrancyGuard, Ownable {
     /**
      * @notice Initializes the contract and sets the owner.
      */
-    constructor() Ownable(msg.sender) {}
+    constructor() {
+        // Grant the initial owner the DEFAULT_ADMIN_ROLE and OWNER_ROLE
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(OWNER_ROLE, msg.sender);
+        _grantRole(MANAGER_ROLE, msg.sender);
+    }
+
+    // Admin can grant roles to other addresses
+    function grantManagerRole(address account) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        grantRole(MANAGER_ROLE, account);
+    }
+
+    // Function for the admin to adjust the maximum size of activeLoanIds
+    function setMaxActiveLoans(uint256 newMax) external onlyRole(OWNER_ROLE) {
+        require(newMax > 0, "Max active loans must be greater than zero");
+        maxActiveLoans = newMax;
+    }
 
     /**
      * @notice Updates the list of allowed NFT contracts.
      * @param nftAddress Address of the NFT contract.
      * @param allowed Whether the NFT contract is allowed.
      */
-    function updateAllowedNFT(address nftAddress, bool allowed) external onlyOwner {
+    function updateAllowedNFT(address nftAddress, bool allowed) external onlyRole(MANAGER_ROLE) {
         allowedNFTs[nftAddress] = allowed;
         emit AllowedNFTUpdated(nftAddress, allowed);
+    }
+
+    // Admin can revoke roles from other addresses
+    function revokeManagerRole(address account) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        revokeRole(MANAGER_ROLE, account);
     }
 
     /**
      * @notice Sets the protocol fee rate.
      * @param newFeeRate New protocol fee rate in basis points.
      */
-    function setProtocolFeeRate(uint256 newFeeRate) external onlyOwner {
+    function setProtocolFeeRate(uint256 newFeeRate) external onlyRole(OWNER_ROLE) {
         require(newFeeRate <= 1000, "Fee rate too high"); // Max 10%
         protocolFeeRate = newFeeRate;
         emit ProtocolFeeRateUpdated(newFeeRate);
@@ -108,8 +144,8 @@ contract NFTLendAuction is ReentrancyGuard, Ownable {
         uint256 loanAmount,
         uint256 maxInterestRate,
         uint256 duration
-    ) external nonReentrant isAllowedNFT(nftAddress) {
-        require(IERC721(nftAddress).ownerOf(tokenId) == msg.sender, "Not NFT owner");
+    ) external nonReentrant isAllowedNFT(nftAddress) onlyNftOwner(nftAddress, tokenId) {
+        require(activeLoanIds.length < maxActiveLoans, "Active loan limit reached");
 
         // Transfer the NFT to the contract
         IERC721(nftAddress).transferFrom(msg.sender, address(this), tokenId);
@@ -184,7 +220,7 @@ contract NFTLendAuction is ReentrancyGuard, Ownable {
         }
 
         // Return the NFT to the borrower
-        IERC721(loan.nftAddress).transferFrom(address(this), loan.borrower, loan.tokenId);
+        IERC721(loan.nftAddress).safeTransferFrom(address(this), loan.borrower, loan.tokenId);
 
         // Clean up loan data
         delete loans[loanId];
@@ -273,7 +309,7 @@ contract NFTLendAuction is ReentrancyGuard, Ownable {
 
         // Transfer NFT back to borrower
         loan.isAccepted = false;
-        IERC721(loan.nftAddress).transferFrom(address(this), loan.borrower, loan.tokenId);
+        IERC721(loan.nftAddress).safeTransferFrom(address(this), loan.borrower, loan.tokenId);
 
         // Transfer lender payout
         payable(loan.lender).transfer(lenderPayout);
@@ -287,9 +323,8 @@ contract NFTLendAuction is ReentrancyGuard, Ownable {
      * @notice Cancels a bid if the borrower doesn't accept.
      * @param loanId ID of the loan to cancel.
      */
-    function cancelBid(uint256 loanId) external nonReentrant loanExists(loanId) isNotAccepted(loanId) {
+    function cancelBid(uint256 loanId) external nonReentrant loanExists(loanId) isNotAccepted(loanId) onlyLender(loanId) {
         Loan storage loan = loans[loanId];
-        require(msg.sender == loan.lender, "Only the lender can cancel the bid");
 
         // Refund escrowed funds to the lender
         uint256 escrowAmount = escrowedFunds[loanId];
@@ -333,7 +368,8 @@ contract NFTLendAuction is ReentrancyGuard, Ownable {
 
         // Transfer NFT to the lender
         loan.isAccepted = false;
-        IERC721(loan.nftAddress).transferFrom(address(this), loan.lender, loan.tokenId);
+        IERC721(loan.nftAddress).safeTransferFrom(address(this), loan.lender, loan.tokenId);
+
 
         emit LoanDefaulted(loanId, loan);
 
@@ -354,11 +390,14 @@ contract NFTLendAuction is ReentrancyGuard, Ownable {
      */
     function _removeActiveLoan(uint256 loanId) private {
         delete activeLoans[loanId];
-        for (uint256 i = 0; i < activeLoanIds.length; i++) {
+        for (uint256 i = 0; i < activeLoanIds.length; ) {
             if (activeLoanIds[i] == loanId) {
                 activeLoanIds[i] = activeLoanIds[activeLoanIds.length - 1];
                 activeLoanIds.pop();
                 break;
+            }
+            unchecked {
+                i++;
             }
         }
     }
@@ -367,11 +406,40 @@ contract NFTLendAuction is ReentrancyGuard, Ownable {
     * @notice Withdraws accumulated protocol fees to the specified address.
     * @param to Address to receive the fees.
     */
-    function withdrawProtocolFees(address payable to) external onlyOwner nonReentrant {
+    function withdrawProtocolFees(address payable to) external nonReentrant onlyRole(OWNER_ROLE) {
+        require(to != address(0), "Invalid recipient address");
         uint256 amount = protocolFeeBalance;
+
         protocolFeeBalance = 0;
-        to.transfer(amount);
+        
+        (bool success, ) = to.call{value: amount}("");
+        require(success, "Withdrawal failed");
+
         emit ProtocolFeesWithdrawn(to, amount);
+    }
+
+    // Withdraw locked Ether sent to the contract by mistake
+    function withdrawEther(address payable to) external nonReentrant onlyRole(OWNER_ROLE) {
+        require(to != address(0), "Invalid recipient address");
+
+        // Calculate the total balance held by the contract
+        uint256 totalBalance = address(this).balance;
+
+        // Calculate total escrowed funds (sum of all values in escrowedFunds mapping)
+        uint256 totalEscrowedFunds = 0;
+        for (uint256 i = 0; i < activeLoanIds.length; i++) {
+            totalEscrowedFunds += escrowedFunds[activeLoanIds[i]];
+        }
+
+        // Calculate withdrawable amount:
+        uint256 withdrawableAmount = totalBalance - totalEscrowedFunds - protocolFeeBalance;
+        require(withdrawableAmount > 0, "No funds available for withdrawal");
+
+        // Perform the withdrawal
+        (bool success, ) = to.call{value: withdrawableAmount}("");
+        require(success, "Ether transfer failed");
+
+        emit ProtocolFeesWithdrawn(to, withdrawableAmount);
     }
 
 }

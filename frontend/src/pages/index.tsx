@@ -197,7 +197,7 @@ export default function Home() {
 
                 // Extract LoanId from the LoanListed event
                 const loanListedEvent = receipt.logs.find(log =>
-                    log.topics[0] === ethers.utils.id("LoanListed(uint256,(address,address,address,uint256,uint256,uint256,uint256,uint256,bool))")
+                    log.topics[0] === ethers.utils.id("LoanListed(uint256)") // 0xa1245a80903048d748a2cbd2d90c4e25d716e52ebe400f5d87e3cb233dbb1564
                 );
 
                 if (!loanListedEvent) {

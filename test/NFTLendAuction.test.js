@@ -76,7 +76,7 @@ describe("NFTLendAuction", function () {
   it("should prevent non-owners from updating the allowed NFT list", async function () {
     await expect(
       nftLendAuction.connect(borrower).updateAllowedNFT(nftContract.address, false)
-    ).to.be.revertedWithCustomError(nftLendAuction, "OwnableUnauthorizedAccount").withArgs(borrower.address);
+    ).to.be.revertedWithCustomError(nftLendAuction, "AccessControlUnauthorizedAccount");
   });
   
   it("should emit an event when updating the allowed NFT list", async function () {
@@ -179,7 +179,7 @@ describe("NFTLendAuction", function () {
 
     await expect(
         nftLendAuction.connect(lender2).cancelBid(0)
-    ).to.be.revertedWith("Only the lender can cancel the bid");
+    ).to.be.revertedWith("Not loan lender");
   });
 
   it("should prevent bid cancellation for accepted loans", async function () {
@@ -380,7 +380,7 @@ describe("NFTLendAuction", function () {
   it("should prevent non-owners from updating the protocol fee rate", async function () {
     await expect(
       nftLendAuction.connect(borrower).setProtocolFeeRate(300)
-    ).to.be.revertedWithCustomError(nftLendAuction, "OwnableUnauthorizedAccount");
+    ).to.be.revertedWithCustomError(nftLendAuction, "AccessControlUnauthorizedAccount");
   });
 
 
@@ -403,7 +403,7 @@ describe("NFTLendAuction", function () {
   it("should prevent non-owners from withdrawing protocol fees", async function () {
     await expect(
       nftLendAuction.connect(borrower).withdrawProtocolFees(borrower.address)
-    ).to.be.revertedWithCustomError(nftLendAuction, "OwnableUnauthorizedAccount");
+    ).to.be.revertedWithCustomError(nftLendAuction, "AccessControlUnauthorizedAccount");
   });
 
   
