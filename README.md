@@ -2,7 +2,7 @@
 
 This repository contains the NFTLendAuction smart contract, a decentralized lending platform where borrowers can list NFTs as collateral for loans, and lenders can bid by offering loans at competitive interest rates.
 
-> ⚠️ **Warning:** This contract has not been audited, use at your own risk.
+> ⚠️ **Warning:** This contract has not been audited ([See automated scanner report](https://solidityscan.com/published-report/project/6b4a5693b706c28e)), use at your own risk.
 
 ## Features
 - Borrowers can list NFTs as collateral for loans.

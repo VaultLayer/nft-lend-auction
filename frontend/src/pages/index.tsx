@@ -245,15 +245,25 @@ export default function Home() {
             // Fetch loan details
             const loan = await contract.loans(loanId);
             const loanAmount = ethers.BigNumber.from(loan.loanAmount);
+            const currentInterestRate = ethers.BigNumber.from(loan.currentInterestRate);
     
             // Fetch protocol fee rate
             const protocolFeeRate = await contract.protocolFeeRate(); // In bps
-            const protocolFee = loanAmount.mul(protocolFeeRate).div(10000);
     
-            // Calculate expected borrower amount after fee deduction
-            const expectedBorrowerAmount = loanAmount.sub(protocolFee);
+            // Calculate repayment amount
+            const interestAmount = loanAmount.mul(currentInterestRate).div(10000); // Interest = loanAmount * rate / 10000
+            const totalRepayment = loanAmount.add(interestAmount); // Total repayment = principal + interest
+            const borrowerProtocolFee = totalRepayment.mul(Number(protocolFeeRate)).div(10000); // Borrower's protocol fee
+            const repaymentAmount = totalRepayment.add(borrowerProtocolFee); // Total payment required from borrower
     
-            if (!window.confirm(`You will receive ${ethers.utils.formatEther(expectedBorrowerAmount)} $CORE after protocol fee deduction. Proceed?`)) {
+            // Inform the user about the repayment amount
+            if (
+                !window.confirm(
+                    `Before the time duration you will have to repay ${ethers.utils.formatEther(repaymentAmount)} $CORE, including a protocol fee of ${ethers.utils.formatEther(
+                        borrowerProtocolFee
+                    )} $CORE. Not repaying means loosing the NFT and associated Staked-BTC on it, Proceed?`
+                )
+            ) {
                 return;
             }
     
@@ -292,7 +302,7 @@ export default function Home() {
                 !window.confirm(
                     `You will repay ${ethers.utils.formatEther(repaymentAmount)} $CORE, including a protocol fee of ${ethers.utils.formatEther(
                         borrowerProtocolFee
-                    )} $CORE. Proceed?`
+                    )} $CORE. Not repaying means loosing the NFT and associated Staked-BTC on it, Proceed?`
                 )
             ) {
                 return;
