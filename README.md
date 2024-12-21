@@ -1,4 +1,4 @@
-# NFTLendAuction Smart Contract
+# NFTLendAuction Smart Contract v1
 
 This repository contains the NFTLendAuction smart contract, a decentralized lending platform where borrowers can list NFTs as collateral for loans, and lenders can bid by offering loans at competitive interest rates.
 
@@ -25,10 +25,24 @@ This repository contains the NFTLendAuction smart contract, a decentralized lend
 
 ## Protocol Fees and Interest Calculations
 
+### Loan Types
+The contract supports two loan types:
+1. **Fixed Interest Loans (LoanType.FIXED):**
+   - Interest is calculated based on the full loan amount and the interest rate specified.
+   - Formula: `Interest = Loan Amount × Interest Rate ÷ 10000`.
+
+2. **APR-Based Loans (LoanType.APR):**
+   - Interest is calculated based on the duration of the loan.
+   - If the loan is accepted, interest is prorated based on the elapsed time since acceptance.
+   - If the loan is not yet accepted, interest is calculated based on the full loan duration.
+   - Formula:
+     - Accepted Loan: `Interest = (Loan Amount × Interest Rate ÷ 10000) × (Elapsed Days ÷ 365)`.
+     - Pending Loan: `Interest = (Loan Amount × Interest Rate ÷ 10000) × (Duration Days ÷ 365)`.
+
 ### Borrower Repayment
 When a borrower repays a loan, the repayment amount includes:
 - **Principal:** The original loan amount.
-- **Interest:** Calculated as `Loan Amount × Current Interest Rate ÷ 10000`.
+- **Interest:** Based on the loan type (Fixed or APR).
 - **Borrower Protocol Fee:** A percentage of the total repayment (`Total Repayment × Protocol Fee Rate ÷ 10000`).
 
 ### Lender Protocol Fee

@@ -27,6 +27,7 @@ type Loan = {
     startTime: string; // Friendly start time
     endTime: string; // Friendly end time
     isAccepted: boolean;
+    loanType: string;
 };
 
 const allowedNFTs = process.env.NEXT_PUBLIC_ALLOWED_NFTS?.split(",") || [];
@@ -41,17 +42,10 @@ export default function Home() {
         loanAmount: "",
         maxInterestRate: "",
         durationDays: "", // Input duration in days
+        loanType: "" // 0 for Fixed, 1 for APR
     });
     const [openModal, setOpenModal] = useState(false);
 
-    const calculateLenderAmount = (loanAmount: string, currentInterestRate: string) => {
-        const protocolFeeRate = 5;
-        const loan = ethers.utils.parseEther(loanAmount);
-        const interest = loan.mul(Number(currentInterestRate)).div(10000);
-        const repaymentAmount = loan.add(interest);
-        const protocolFee = repaymentAmount.mul(protocolFeeRate).div(10000);
-        return ethers.utils.formatEther(repaymentAmount.sub(protocolFee));
-    };
 
     const fetchLoans = async () => {
         try {
@@ -96,6 +90,7 @@ export default function Home() {
                         startTime: startTimeFormatted,
                         endTime: endTimeFormatted,
                         isAccepted: loan.isAccepted, // Updated terminology
+                        loanType: loan.loanType === 0 ? "Fixed" : "APR"
                     });
                 } catch (error) {
                     console.warn(`Error fetching loan ID ${id.toNumber()}:`, error);
@@ -138,7 +133,7 @@ export default function Home() {
             if (!signer) return;
 
             const contract = getContract(signer);
-            const { nftAddress, tokenId, loanAmount, maxInterestRate, durationDays } = newLoan;
+            const { nftAddress, tokenId, loanAmount, maxInterestRate, durationDays, loanType } = newLoan;
 
             if (!allowedNFTs.includes(nftAddress)) {
                 alert("This NFT contract is not allowed.");
@@ -176,6 +171,7 @@ export default function Home() {
                     ethers.utils.parseEther(loanAmount),
                     Math.round(Number(maxInterestRate) * 100), // Convert percentage to bps
                     durationInSeconds,
+                    loanType
                 ]),
             };
 
@@ -197,7 +193,7 @@ export default function Home() {
 
                 // Extract LoanId from the LoanListed event
                 const loanListedEvent = receipt.logs.find(log =>
-                    log.topics[0] === ethers.utils.id("LoanListed(uint256)") // 0xa1245a80903048d748a2cbd2d90c4e25d716e52ebe400f5d87e3cb233dbb1564
+                    log.topics[0] === ethers.utils.id("LoanListed(uint256, address, address, uint256, uint256, uint256, uint256, uint8)") // 0xa1245a80903048d748a2cbd2d90c4e25d716e52ebe400f5d87e3cb233dbb1564
                 );
 
                 if (!loanListedEvent) {
@@ -243,23 +239,15 @@ export default function Home() {
             const contract = getContract(signer);
     
             // Fetch loan details
-            const loan = await contract.loans(loanId);
-            const loanAmount = ethers.BigNumber.from(loan.loanAmount);
-            const currentInterestRate = ethers.BigNumber.from(loan.currentInterestRate);
-    
-            // Fetch protocol fee rate
-            const protocolFeeRate = await contract.protocolFeeRate(); // In bps
-    
-            // Calculate repayment amount
-            const interestAmount = loanAmount.mul(currentInterestRate).div(10000); // Interest = loanAmount * rate / 10000
-            const totalRepayment = loanAmount.add(interestAmount); // Total repayment = principal + interest
-            const borrowerProtocolFee = totalRepayment.mul(Number(protocolFeeRate)).div(10000); // Borrower's protocol fee
-            const repaymentAmount = totalRepayment.add(borrowerProtocolFee); // Total payment required from borrower
-    
+            const totalRepayment = await contract.getTotalRepayment(loanId);
+
+            const protocolFeeRate = await contract.protocolFeeRate();
+            const borrowerProtocolFee = totalRepayment.mul(protocolFeeRate).div(10000);
+            const requiredRepayment = totalRepayment.add(borrowerProtocolFee);
             // Inform the user about the repayment amount
             if (
                 !window.confirm(
-                    `Before the time duration you will have to repay ${ethers.utils.formatEther(repaymentAmount)} $CORE, including a protocol fee of ${ethers.utils.formatEther(
+                    `Before the time duration you will have to repay ${ethers.utils.formatEther(requiredRepayment)} $CORE, including a protocol fee of ${ethers.utils.formatEther(
                         borrowerProtocolFee
                     )} $CORE. Not repaying means loosing the NFT and associated Staked-BTC on it, Proceed?`
                 )
@@ -284,23 +272,16 @@ export default function Home() {
             const contract = getContract(signer);
     
             // Fetch loan details
-            const loan = await contract.loans(loanId);
-            const loanAmount = ethers.BigNumber.from(loan.loanAmount);
-            const currentInterestRate = ethers.BigNumber.from(loan.currentInterestRate);
-    
-            // Fetch protocol fee rate
-            const protocolFeeRate = await contract.protocolFeeRate(); // In bps
-    
-            // Calculate repayment amount
-            const interestAmount = loanAmount.mul(currentInterestRate).div(10000); // Interest = loanAmount * rate / 10000
-            const totalRepayment = loanAmount.add(interestAmount); // Total repayment = principal + interest
-            const borrowerProtocolFee = totalRepayment.mul(Number(protocolFeeRate)).div(10000); // Borrower's protocol fee
-            const repaymentAmount = totalRepayment.add(borrowerProtocolFee); // Total payment required from borrower
-    
+            const totalRepayment = await contract.getTotalRepayment(loanId);
+
+            const protocolFeeRate = await contract.protocolFeeRate();
+            const borrowerProtocolFee = totalRepayment.mul(protocolFeeRate).div(10000);
+            const requiredRepayment = totalRepayment.add(borrowerProtocolFee);
+
             // Inform the user about the repayment amount
             if (
                 !window.confirm(
-                    `You will repay ${ethers.utils.formatEther(repaymentAmount)} $CORE, including a protocol fee of ${ethers.utils.formatEther(
+                    `You will repay ${ethers.utils.formatEther(requiredRepayment)} $CORE, including a protocol fee of ${ethers.utils.formatEther(
                         borrowerProtocolFee
                     )} $CORE. Not repaying means loosing the NFT and associated Staked-BTC on it, Proceed?`
                 )
@@ -309,7 +290,7 @@ export default function Home() {
             }
     
             // Execute the repayment transaction
-            const tx = await contract.repayLoan(loanId, { value: repaymentAmount });
+            const tx = await contract.repayLoan(loanId, { value: requiredRepayment });
             await tx.wait();
     
             fetchLoans();
@@ -325,17 +306,14 @@ export default function Home() {
             const contract = getContract(signer);
     
             // Fetch loan details
-            const loan = await contract.loans(loanId);
-            const loanAmount = ethers.BigNumber.from(loan.loanAmount);
-            const currentInterestRate = ethers.BigNumber.from(loan.currentInterestRate);
-    
-            // Fetch protocol fee rate
-            const protocolFeeRate = await contract.protocolFeeRate(); // In bps
-    
-            // Calculate hypothetical repayment amount
-            const interestAmount = loanAmount.mul(currentInterestRate).div(10000); // Interest = loanAmount * rate / 10000
-            const totalRepayment = loanAmount.add(interestAmount); // Total repayment = principal + interest
-            const lenderProtocolFee = totalRepayment.mul(protocolFeeRate).div(10000); // Lender's protocol fee
+            const totalRepayment = await contract.getTotalRepayment(loanId);
+            const protocolFeeRate = await contract.protocolFeeRate();
+            const lenderProtocolFee = totalRepayment.mul(protocolFeeRate).div(10000);
+
+
+            // Log the fee for debugging
+            console.log("Lender Protocol Fee:", lenderProtocolFee);
+            console.log("Lender Protocol Fee:", ethers.utils.formatEther(lenderProtocolFee));
     
             // Inform the user about the protocol fee required
             if (
@@ -470,9 +448,10 @@ export default function Home() {
                         value={newLoan.maxInterestRate}
                         onChange={(e) => setNewLoan({ ...newLoan, maxInterestRate: e.target.value })}
                     />
+                    <TextField label="Loan Type (0=Fixed, 1=APR)" value={newLoan.loanType} onChange={(e) => setNewLoan({ ...newLoan, loanType: e.target.value })} />
                     <TextField
                         fullWidth
-                        label="Duration (days)"
+                        label="Term Duration (days)"
                         margin="normal"
                         value={newLoan.durationDays}
                         onChange={(e) => setNewLoan({ ...newLoan, durationDays: e.target.value })}
@@ -494,11 +473,8 @@ export default function Home() {
                             <Typography>Lender: {loan.lender || "None"}</Typography>
                             <Typography>Loan Amount: {loan.loanAmount} $CORE</Typography>
                             <Typography>Max Interest Rate: {loan.maxInterestRate}%</Typography>
+                            <Typography>Loan Type: {loan.loanType}</Typography>
                             <Typography>Current Interest Rate: {loan.currentInterestRate}%</Typography>
-                            <Typography>
-                                Lender Receives After Protocol Fee:{" "}
-                                {calculateLenderAmount(loan.loanAmount, loan.currentInterestRate)} $CORE
-                            </Typography>
                             <Typography>Duration: {loan.duration} days</Typography>
                             <Typography>Start Time: {loan.startTime}</Typography>
                             <Typography>End Time: {loan.endTime}</Typography>

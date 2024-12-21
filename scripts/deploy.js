@@ -5,7 +5,8 @@ async function main() {
   const allowedNFTs = [
     "0xa2F47B8832dc2Ceab46123B9ad0Ce4eEc4774f6B", // LSV-v0
     "0xcc89552ff8dAfD016c91B7694dc0B69E23F2479D", // Core Origin NFT
-    "0xe48696582061011BeADcDB1eb132Ff2261CED5cf" // Coretoshis
+    "0xe48696582061011BeADcDB1eb132Ff2261CED5cf", // Coretoshis
+    "0x111d7E1E58Dd8f957c12197b69d3284aea801ad1" // COREx Genesis Apostle
   ];
 
   console.log("Deploying NFTLendAuction contract...");
