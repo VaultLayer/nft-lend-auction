@@ -1,7 +1,7 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 
-describe("NFTLendAuction", function () {
+describe("NFTLendAuctionV1", function () {
   let NFTLendAuction, nftLendAuction, owner, borrower, lender1, lender2, nftContract, anotherNFTContract;
 
   beforeEach(async function () {
@@ -21,7 +21,7 @@ describe("NFTLendAuction", function () {
     await anotherNFTContract.connect(borrower).mint();
 
     // Deploy the NFTLendAuction contract
-    const NFTLendAuction = await ethers.getContractFactory("NFTLendAuction");
+    const NFTLendAuction = await ethers.getContractFactory("NFTLendAuctionV1");
     nftLendAuction = await NFTLendAuction.deploy();
     await nftLendAuction.deployed();
 

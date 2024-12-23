@@ -12,7 +12,7 @@ async function main() {
   console.log("Deploying NFTLendAuction contract...");
   
   // Deploy the contract
-  const NFTLendAuction = await hre.ethers.getContractFactory("NFTLendAuction");
+  const NFTLendAuction = await hre.ethers.getContractFactory("NFTLendAuctionV1");
   const nftLendAuction = await NFTLendAuction.deploy();
 
   await nftLendAuction.deployed();

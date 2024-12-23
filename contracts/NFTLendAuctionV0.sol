@@ -11,12 +11,9 @@ import "@openzeppelin/contracts/access/AccessControl.sol";
 *         Lenders compete to provide loans by bidding with lower interest rates.
 *         Loans can be repaid or claimed by lenders in case of default.
 */
-contract NFTLendAuction is ReentrancyGuard, AccessControl {
+contract NFTLendAuctionV0 is ReentrancyGuard, AccessControl {
     bytes32 public constant OWNER_ROLE = keccak256("OWNER_ROLE");
     bytes32 public constant MANAGER_ROLE = keccak256("MANAGER_ROLE");
-
-    // Enum to define loan types
-    enum LoanType { FIXED, APR }
 
     struct Loan {
         address borrower; // Borrower's address
@@ -28,7 +25,6 @@ contract NFTLendAuction is ReentrancyGuard, AccessControl {
         uint256 currentInterestRate; // Current best bid interest rate (basis points)
         uint256 duration; // Duration of the loan in seconds
         uint256 startTime; // Loan start time (0 if not accepted)
-        LoanType loanType; // Fixed or APR
         bool isAccepted; // Whether the loan is accepted
     }
 
@@ -46,51 +42,16 @@ contract NFTLendAuction is ReentrancyGuard, AccessControl {
 
 
     // Events
-    event LoanListed(
-        uint256 indexed loanId,
-        address indexed borrower,
-        address nftAddress,
-        uint256 tokenId,
-        uint256 loanAmount,
-        uint256 maxInterestRate,
-        uint256 duration,
-        LoanType loanType // Fixed or APR
-    );
-
-    event LoanDelisted(uint256 indexed loanId, address indexed borrower);
-
-    event LoanBidPlaced(
-        uint256 indexed loanId,
-        address indexed lender,
-        uint256 currentInterestRate
-    );
-
-    event LoanBidCancelled(uint256 indexed loanId, address indexed lender);
-
-    event LoanAccepted(
-        uint256 indexed loanId,
-        address indexed borrower,
-        address indexed lender,
-        uint256 startTime
-    );
-
-    event LoanRepaid(
-        uint256 indexed loanId,
-        address indexed borrower,
-        uint256 repaymentAmount
-    );
-
-    event LoanDefaulted(
-        uint256 indexed loanId,
-        address indexed lender
-    );
-
-    event AllowedNFTUpdated(address indexed nftAddress, bool allowed);
-
+    event LoanListed(uint256 loanId, Loan loan);
+    event LoanDelisted(uint256 loanId, Loan loan);
+    event LoanBidPlaced(uint256 loanId, Loan loan);
+    event LoanBidCancelled(uint256 loanId, Loan loan);
+    event LoanAccepted(uint256 loanId, Loan loan);
+    event LoanRepaid(uint256 loanId, Loan loan);
+    event LoanDefaulted(uint256 loanId, Loan loan);
+    event AllowedNFTUpdated(address nftAddress, bool allowed);
     event ProtocolFeeRateUpdated(uint256 newFeeRate);
-
     event ProtocolFeesWithdrawn(address to, uint256 amount);
-
 
     // Modifiers
     modifier onlyBorrower(uint256 loanId) {
@@ -140,6 +101,7 @@ contract NFTLendAuction is ReentrancyGuard, AccessControl {
 
     // Function for the admin to adjust the maximum size of activeLoanIds
     function setMaxActiveLoans(uint256 newMax) external onlyRole(OWNER_ROLE) {
+        require(newMax > 0, "Max active loans must be greater than zero");
         maxActiveLoans = newMax;
     }
 
@@ -181,14 +143,9 @@ contract NFTLendAuction is ReentrancyGuard, AccessControl {
         uint256 tokenId,
         uint256 loanAmount,
         uint256 maxInterestRate,
-        uint256 duration,
-        LoanType loanType // Specify loan type
+        uint256 duration
     ) external nonReentrant isAllowedNFT(nftAddress) onlyNftOwner(nftAddress, tokenId) {
         require(activeLoanIds.length < maxActiveLoans, "Active loan limit reached");
-        require(loanAmount > 0, "Loan amount must be greater than zero");
-        require(maxInterestRate > 0, "Interest rate must be greater than zero");
-        require(duration > 0, "Loan duration must be greater than zero");
-        require(uint256(loanType) <= uint256(type(LoanType).max), "Invalid loan type");
 
         // Transfer the NFT to the contract
         IERC721(nftAddress).transferFrom(msg.sender, address(this), tokenId);
@@ -204,7 +161,6 @@ contract NFTLendAuction is ReentrancyGuard, AccessControl {
             currentInterestRate: maxInterestRate,
             duration: duration,
             startTime: 0,
-            loanType: loanType, // Assign loan type
             isAccepted: false
         });
 
@@ -212,16 +168,7 @@ contract NFTLendAuction is ReentrancyGuard, AccessControl {
         activeLoans[loanCounter] = true;
         activeLoanIds.push(loanCounter);
 
-        emit LoanListed(
-            loanCounter,
-            msg.sender,
-            nftAddress,
-            tokenId,
-            loanAmount,
-            maxInterestRate,
-            duration,
-            loanType
-        );
+        emit LoanListed(loanCounter, loans[loanCounter]);
 
         loanCounter++;
     }
@@ -254,8 +201,7 @@ contract NFTLendAuction is ReentrancyGuard, AccessControl {
         loan.currentInterestRate = interestRate;
         escrowedFunds[loanId] = msg.value;
 
-        emit LoanBidPlaced(loanId, msg.sender, interestRate);
-
+        emit LoanBidPlaced(loanId, loan);
     }
 
     /**
@@ -279,8 +225,7 @@ contract NFTLendAuction is ReentrancyGuard, AccessControl {
         delete loans[loanId];
         _removeActiveLoan(loanId);
 
-        emit LoanDelisted(loanId, loan.borrower);
-
+        emit LoanDelisted(loanId, loan);
     }
 
     /**
@@ -296,53 +241,37 @@ contract NFTLendAuction is ReentrancyGuard, AccessControl {
         Loan storage loan = loans[loanId];
         require(loan.lender != address(0), "No lender bid yet");
 
-        require(loan.startTime == 0, "Loan already started");
-        loan.startTime = block.timestamp;
-
         loan.isAccepted = true;
+        loan.startTime = block.timestamp;
 
         uint256 loanAmount = escrowedFunds[loanId];
         escrowedFunds[loanId] = 0;
         payable(loan.borrower).transfer(loanAmount);
 
-        emit LoanAccepted(loanId, loan.borrower, loan.lender, loan.startTime);
-
+        emit LoanAccepted(loanId, loan);
     }
 
     /**
     * @notice Get the total required repayment for a loan.
     * @param loanId ID of the loan to repay.
     */
-    function getTotalRepayment(uint256 loanId)
-        public
-        view
-        loanExists(loanId)
-        returns (uint256)
-    {
+    function getRequiredRepayment(uint256 loanId)
+    public
+    view
+    loanExists(loanId)
+    returns (uint256) {
         Loan storage loan = loans[loanId];
-        
-        uint256 interestAmount;
+        require(loan.isAccepted, "Loan not accepted yet");
 
-        if (loan.loanType == LoanType.FIXED) {
-            // Fixed interest calculation
-            interestAmount = (loan.loanAmount * loan.currentInterestRate) / 10000;
-        } else if (loan.loanType == LoanType.APR) {
-            // APR interest calculation
-            uint256 annualizedInterest = (loan.loanAmount * loan.currentInterestRate) / 10000;
+        // Calculate total repayment: principal + interest
+        uint256 interestAmount = (loan.loanAmount * loan.currentInterestRate) / 10000;
+        uint256 totalRepayment = loan.loanAmount + interestAmount;
 
-            if (loan.isAccepted) {
-                // Pro-rate interest for elapsed days
-                uint256 elapsedTimeInDays = (block.timestamp - loan.startTime) / 1 days;
-                interestAmount = (annualizedInterest * (elapsedTimeInDays > 0 ? elapsedTimeInDays : 1)) / 365;
-            } else {
-                // Calculate APR based on full loan duration if not yet accepted
-                uint256 durationInDays = loan.duration / 1 days;
-                interestAmount = (annualizedInterest * (durationInDays > 0 ? durationInDays : 1)) / 365;
-            }
-        }
+        // Calculate borrower protocol fee
+        uint256 borrowerProtocolFee = (totalRepayment * protocolFeeRate) / 10000;
 
-        // Return total repayment: principal + interest
-        return loan.loanAmount + interestAmount;
+        // Return the required payment: total repayment + borrower protocol fee
+        return totalRepayment + borrowerProtocolFee;
     }
 
     /**
@@ -350,33 +279,29 @@ contract NFTLendAuction is ReentrancyGuard, AccessControl {
     * @param loanId ID of the loan to repay.
     */
     function repayLoan(uint256 loanId)
-        external
-        payable
-        nonReentrant
-        loanExists(loanId)
-        onlyBorrower(loanId)
-    {
+    external
+    payable
+    nonReentrant
+    loanExists(loanId)
+    onlyBorrower(loanId) {
         Loan storage loan = loans[loanId];
         require(loan.isAccepted, "Loan not accepted yet");
-        require(block.timestamp >= loan.startTime, "Repayment before loan start time");
         require(block.timestamp <= loan.startTime + loan.duration, "Loan duration expired");
 
-        // Get total repayment amount
-        uint256 totalRepayment = getTotalRepayment(loanId);
+        uint256 requiredPayment = getRequiredRepayment(loanId);
+        require(msg.value == requiredPayment, "Incorrect repayment amount");
 
-        // Calculate protocol fees
-        uint256 borrowerProtocolFee = (totalRepayment * protocolFeeRate) / 10000;
+        // Calculate total repayment: principal + interest
+        uint256 interestAmount = (loan.loanAmount * loan.currentInterestRate) / 10000;
+        uint256 totalRepayment = loan.loanAmount + interestAmount;
+
+        // Calculate lender protocol fee
         uint256 lenderProtocolFee = (totalRepayment * protocolFeeRate) / 10000;
-
-        // Total amount required from borrower
-        uint256 requiredRepayment = totalRepayment + borrowerProtocolFee;
-        require(msg.value >= requiredRepayment, "Incorrect repayment amount");
-
-        // Calculate lender payout
         uint256 lenderPayout = totalRepayment - lenderProtocolFee;
 
         // Update protocol fee balance
-        protocolFeeBalance += (lenderProtocolFee + borrowerProtocolFee);
+        uint256 borrowerProtocolFee = (totalRepayment * protocolFeeRate) / 10000;
+        protocolFeeBalance += (borrowerProtocolFee + lenderProtocolFee);
 
         // Transfer NFT back to borrower
         loan.isAccepted = false;
@@ -385,11 +310,10 @@ contract NFTLendAuction is ReentrancyGuard, AccessControl {
         // Transfer lender payout
         payable(loan.lender).transfer(lenderPayout);
 
-        emit LoanRepaid(loanId, loan.borrower, msg.value);
+        emit LoanRepaid(loanId, loan);
 
         _removeActiveLoan(loanId);
     }
-
 
     /**
     * @notice Cancels a bid if the borrower doesn't accept.
@@ -407,8 +331,7 @@ contract NFTLendAuction is ReentrancyGuard, AccessControl {
         loan.lender = address(0);
         loan.currentInterestRate = loan.maxInterestRate; // Reset to max rate
 
-        emit LoanBidCancelled(loanId, loan.lender);
-
+        emit LoanBidCancelled(loanId, loan);
     }
 
 
@@ -425,15 +348,16 @@ contract NFTLendAuction is ReentrancyGuard, AccessControl {
         require(loan.isAccepted, "Loan not accepted");
         require(block.timestamp > loan.startTime + loan.duration, "Loan not expired");
 
-        // Get the total repayment (principal + interest)
-        uint256 totalRepayment = getTotalRepayment(loanId);
+        // Calculate the hypothetical repayment amount
+        uint256 interestAmount = (loan.loanAmount * loan.currentInterestRate) / 10000;
+        uint256 totalRepayment = loan.loanAmount + interestAmount;
 
-        // Calculate the lender's protocol fee based on the total repayment
+        // Calculate the lender's protocol fee
         uint256 lenderProtocolFee = (totalRepayment * protocolFeeRate) / 10000;
 
-        // Ensure lender sends the correct protocol fee
+        // Ensure the lender sends the required protocol fee
         require(msg.value == lenderProtocolFee, "Incorrect protocol fee sent");
-        
+
         // Update protocol fee balance
         protocolFeeBalance += lenderProtocolFee;
 
@@ -441,7 +365,8 @@ contract NFTLendAuction is ReentrancyGuard, AccessControl {
         loan.isAccepted = false;
         IERC721(loan.nftAddress).safeTransferFrom(address(this), loan.lender, loan.tokenId);
 
-        emit LoanDefaulted(loanId, loan.lender);
+
+        emit LoanDefaulted(loanId, loan);
 
         _removeActiveLoan(loanId);
     }
