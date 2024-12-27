@@ -2,8 +2,6 @@
 
 This repository contains the NFTLendAuction smart contract, a decentralized lending platform where borrowers can list NFTs as collateral for loans, and lenders can bid by offering loans at competitive interest rates.
 
-> ⚠️ **Warning:** This contract has not been audited ([See automated scanner report](https://solidityscan.com/published-report/project/6b4a5693b706c28e)), use at your own risk.
-
 ## Features
 - Borrowers can list NFTs as collateral for loans.
 - Lenders can bid by offering loans at lower interest rates.
@@ -22,6 +20,13 @@ This repository contains the NFTLendAuction smart contract, a decentralized lend
   - `repayLoan`: Allows a borrower to repay the loan and reclaim their NFT.
   - `cancelBid`: Allows lenders to cancel their bids for unaccepted loans.
   - `delistLoan`: Allows borrowers to delist their loans and refund escrowed funds to lenders.
+
+## Audits
+
+> ⚠️ **Warning:** This code is beta software provided as is, use at your own risk.
+
+-  [V0 Automated Scanner Report](https://solidityscan.com/published-report/project/6b4a5693b706c28e)
+-  [V1 InterFi External Audit Report](https://github.com/VaultLayer/nft-lend-auction/blob/v1/contracts/audits/NFTLendAuctionV1_AuditReport_InterFi.pdf)
 
 ## Protocol Fees and Interest Calculations
 
