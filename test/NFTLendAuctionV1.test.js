@@ -22,7 +22,7 @@ describe("NFTLendAuctionV1", function () {
 
     // Deploy the NFTLendAuction contract
     const NFTLendAuction = await ethers.getContractFactory("NFTLendAuctionV1");
-    nftLendAuction = await NFTLendAuction.deploy();
+    nftLendAuction = await NFTLendAuction.deploy(owner.address);
     await nftLendAuction.deployed();
 
     // Allow the first NFT contract by the owner
@@ -184,6 +184,10 @@ it("should prevent listing a loan without a valid loanType", async function () {
     await nftLendAuction.connect(borrower).listLoan(nftContract.address, 1, loanAmount, 1000, 604800, 0);
 
     await nftLendAuction.connect(lender1).placeBid(0, 800, { value: loanAmount });
+
+    // Move time forward by 1 day
+    await network.provider.send("evm_increaseTime", [24 * 3601]);
+    await network.provider.send("evm_mine");
 
     const lenderBalanceBefore = await ethers.provider.getBalance(lender1.address);
 
@@ -442,7 +446,7 @@ it("should require lender to pay protocol fee upon claiming a defaulted loan", a
     const lenderBalanceBefore = await ethers.provider.getBalance(lender1.address);
 
     // Advance time within the loan duration
-    await ethers.provider.send("evm_increaseTime", [5 * 24 * 60 * 60]); // 30 days (within duration)
+    await ethers.provider.send("evm_increaseTime", [5 * 24 * 60 * 60]); // 5 days (within duration)
     await ethers.provider.send("evm_mine", []);
 
     // Fetch total repayment and protocol fee details from the contract
