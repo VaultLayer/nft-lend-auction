@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.23;
+pragma solidity 0.8.23;
 
 import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -35,7 +35,7 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
     uint256 public loanCounter; // Counter to track the total number of loans created
     mapping(uint256 => Loan) public loans; // Mapping of loan IDs to loan details
     mapping(uint256 => uint256) public escrowedFunds; // Mapping of loan IDs to escrowed lender funds
-    mapping(address => bool) public allowedNFTs; // Tracks which NFT contracts are allowed
+    mapping(address => bool) public allowedNFTContracts; // Tracks which NFT contracts are allowed
 
     uint256 public maxActiveLoans = 1000; // Default maximum size for active loans
     uint256[] public activeLoanIds; // List of IDs for currently active loans
@@ -44,6 +44,9 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
     uint256 public protocolFeeRate = 200; // Protocol fee rate in basis points (5%)
     uint256 public protocolFeeBalance; // Accumulated protocol fees
 
+    // Add bid cooldown period
+    mapping(uint256 => uint256) public bidTimestamps; // Timestamp for the last bid placed
+    uint256 public bidCancelPeriod = 1 days; // Initial cooldown period
 
     // Events
     event LoanListed(
@@ -91,6 +94,10 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
 
     event ProtocolFeesWithdrawn(address to, uint256 amount);
 
+    event MaxActiveLoansUpdated(uint256 newMaxActiveLoans);
+
+    event BidCancelPeriodUpdated(uint256 newBidCancelPeriod);
+
 
     // Modifiers
     modifier onlyBorrower(uint256 loanId) {
@@ -119,18 +126,18 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
     }
 
     modifier isAllowedNFT(address nftAddress) {
-        require(allowedNFTs[nftAddress], "NFT contract not allowed");
+        require(allowedNFTContracts[nftAddress], "NFT contract not allowed");
         _;
     }
 
     /**
-    * @notice Initializes the contract and sets the owner.
+    * @notice Initializes the contract and sets the govern address.
     */
-    constructor() {
+    constructor(address _govAddress) {
         // Grant the initial owner the DEFAULT_ADMIN_ROLE and OWNER_ROLE
-        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        _grantRole(OWNER_ROLE, msg.sender);
-        _grantRole(MANAGER_ROLE, msg.sender);
+        _grantRole(DEFAULT_ADMIN_ROLE, _govAddress);
+        _grantRole(OWNER_ROLE, _govAddress);
+        _grantRole(MANAGER_ROLE, _govAddress);
     }
 
     // Admin can grant roles to other addresses
@@ -141,6 +148,7 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
     // Function for the admin to adjust the maximum size of activeLoanIds
     function setMaxActiveLoans(uint256 newMax) external onlyRole(OWNER_ROLE) {
         maxActiveLoans = newMax;
+        emit MaxActiveLoansUpdated(maxActiveLoans);
     }
 
     /**
@@ -149,7 +157,7 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
     * @param allowed Whether the NFT contract is allowed.
     */
     function updateAllowedNFT(address nftAddress, bool allowed) external onlyRole(MANAGER_ROLE) {
-        allowedNFTs[nftAddress] = allowed;
+        allowedNFTContracts[nftAddress] = allowed;
         emit AllowedNFTUpdated(nftAddress, allowed);
     }
 
@@ -166,6 +174,16 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
         require(newFeeRate <= 1000, "Fee rate too high"); // Max 10%
         protocolFeeRate = newFeeRate;
         emit ProtocolFeeRateUpdated(newFeeRate);
+    }
+
+    /**
+    * @notice Sets the BidCancelPeriod.
+    * @param newBidCancelPeriod New newBidCancelPeriod.
+    */
+    function setBidCancelPeriod(uint256 newBidCancelPeriod) external onlyRole(OWNER_ROLE) {
+        require(newBidCancelPeriod > 1 hours, "New BidCancelPeriod is less than 1 hour"); 
+        bidCancelPeriod = newBidCancelPeriod;
+        emit BidCancelPeriodUpdated(newBidCancelPeriod);
     }
 
     /**
@@ -190,11 +208,9 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
         require(duration > 0, "Loan duration must be greater than zero");
         require(uint256(loanType) <= uint256(type(LoanType).max), "Invalid loan type");
 
-        // Transfer the NFT to the contract
-        IERC721(nftAddress).transferFrom(msg.sender, address(this), tokenId);
-
+        uint256 loanId = loanCounter;
         // Create a new loan
-        loans[loanCounter] = Loan({
+        loans[loanId] = Loan({
             borrower: msg.sender,
             lender: address(0),
             nftAddress: nftAddress,
@@ -209,21 +225,26 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
         });
 
         // Track active loan
-        activeLoans[loanCounter] = true;
-        activeLoanIds.push(loanCounter);
-
-        emit LoanListed(
-            loanCounter,
-            msg.sender,
-            nftAddress,
-            tokenId,
-            loanAmount,
-            maxInterestRate,
-            duration,
-            loanType
-        );
+        activeLoans[loanId] = true;
+        activeLoanIds.push(loanId);
 
         loanCounter++;
+
+        // Transfer the NFT to the contract
+        try IERC721(nftAddress).transferFrom(msg.sender, address(this), tokenId) {
+            emit LoanListed(
+                loanId,
+                msg.sender,
+                nftAddress,
+                tokenId,
+                loanAmount,
+                maxInterestRate,
+                duration,
+                loanType
+            );
+        } catch {
+            revert("NFT transfer failed"); // Abort on failure
+        } 
     }
 
     /**
@@ -244,18 +265,24 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
         );
         require(msg.value == loan.loanAmount, "Incorrect loan amount");
 
-        // Refund the previous lender if there is one
-        if (loan.lender != address(0)) {
-            payable(loan.lender).transfer(escrowedFunds[loanId]);
+        address previousBider = loan.lender;
+        uint256 escrowRefund = 0;
+        if (previousBider != address(0)) {
+            escrowRefund = escrowedFunds[loanId];
         }
-
         // Update loan details
         loan.lender = msg.sender;
         loan.currentInterestRate = interestRate;
         escrowedFunds[loanId] = msg.value;
 
-        emit LoanBidPlaced(loanId, msg.sender, interestRate);
+        // Setting cooldown period start
+        bidTimestamps[loanId] = block.timestamp; 
 
+        // Refund the previous lender if there is one
+        if (previousBider != address(0) && escrowRefund > 0) {
+            payable(previousBider).transfer(escrowRefund);
+        }
+        emit LoanBidPlaced(loanId, msg.sender, interestRate);
     }
 
     /**
@@ -263,24 +290,29 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
     * @param loanId ID of the loan to delist.
     */
     function delistLoan(uint256 loanId) external nonReentrant loanExists(loanId) isNotAccepted(loanId) onlyBorrower(loanId) {
-        Loan storage loan = loans[loanId];
+        Loan memory loan = loans[loanId];
 
         // Refund escrowed funds to the last bidder (if any)
-        if (loan.lender != address(0)) {
-            uint256 escrowAmount = escrowedFunds[loanId];
+        address previousBider = loan.lender;
+        uint256 escrowRefund = 0;
+        if (previousBider != address(0)) {
+            escrowRefund = escrowedFunds[loanId];
             escrowedFunds[loanId] = 0; // Clear escrow
-            payable(loan.lender).transfer(escrowAmount);
         }
-
-        // Return the NFT to the borrower
-        IERC721(loan.nftAddress).safeTransferFrom(address(this), loan.borrower, loan.tokenId);
 
         // Clean up loan data
         delete loans[loanId];
         _removeActiveLoan(loanId);
 
-        emit LoanDelisted(loanId, loan.borrower);
-
+        // Return the NFT to the borrower
+        try IERC721(loan.nftAddress).safeTransferFrom(address(this), loan.borrower, loan.tokenId) {
+            if (previousBider != address(0) && escrowRefund > 0) {
+                payable(previousBider).transfer(escrowRefund);
+            }
+            emit LoanDelisted(loanId, loan.borrower);
+        } catch {
+            revert("NFT transfer failed"); // Abort on failure
+        }        
     }
 
     /**
@@ -295,7 +327,7 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
     onlyBorrower(loanId) {
         Loan storage loan = loans[loanId];
         require(loan.lender != address(0), "No lender bid yet");
-
+        require(escrowedFunds[loanId] == loan.loanAmount, "Escrowed funds do not match loan amount");
         require(loan.startTime == 0, "Loan already started");
         loan.startTime = block.timestamp;
 
@@ -306,7 +338,6 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
         payable(loan.borrower).transfer(loanAmount);
 
         emit LoanAccepted(loanId, loan.borrower, loan.lender, loan.startTime);
-
     }
 
     /**
@@ -333,6 +364,7 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
             if (loan.isAccepted) {
                 // Pro-rate interest for elapsed days
                 uint256 elapsedTimeInDays = (block.timestamp - loan.startTime) / 1 days;
+                // If less than a day, use 1 day as minimum
                 interestAmount = (annualizedInterest * (elapsedTimeInDays > 0 ? elapsedTimeInDays : 1)) / 365;
             } else {
                 // Calculate APR based on full loan duration if not yet accepted
@@ -343,6 +375,11 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
 
         // Return total repayment: principal + interest
         return loan.loanAmount + interestAmount;
+    }
+
+    // Calculate Protocol Fee
+    function calculateProtocolFee(uint256 amount) internal view returns (uint256) {
+        return (amount * protocolFeeRate) / 10000;
     }
 
     /**
@@ -365,8 +402,8 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
         uint256 totalRepayment = getTotalRepayment(loanId);
 
         // Calculate protocol fees
-        uint256 borrowerProtocolFee = (totalRepayment * protocolFeeRate) / 10000;
-        uint256 lenderProtocolFee = (totalRepayment * protocolFeeRate) / 10000;
+        uint256 borrowerProtocolFee = calculateProtocolFee(totalRepayment);
+        uint256 lenderProtocolFee = calculateProtocolFee(totalRepayment);
 
         // Total amount required from borrower
         uint256 requiredRepayment = totalRepayment + borrowerProtocolFee;
@@ -378,16 +415,19 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
         // Update protocol fee balance
         protocolFeeBalance += (lenderProtocolFee + borrowerProtocolFee);
 
-        // Transfer NFT back to borrower
+        // Clean up loan data
         loan.isAccepted = false;
-        IERC721(loan.nftAddress).safeTransferFrom(address(this), loan.borrower, loan.tokenId);
-
-        // Transfer lender payout
-        payable(loan.lender).transfer(lenderPayout);
-
-        emit LoanRepaid(loanId, loan.borrower, msg.value);
-
         _removeActiveLoan(loanId);
+
+        // Transfer NFT back to borrower        
+        try IERC721(loan.nftAddress).safeTransferFrom(address(this), loan.borrower, loan.tokenId) {
+            // Transfer lender payout
+            payable(loan.lender).transfer(lenderPayout);
+            emit LoanRepaid(loanId, loan.borrower, msg.value);
+        } catch {
+            revert("NFT transfer failed"); // Abort on failure
+        }
+
     }
 
 
@@ -398,17 +438,23 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
     function cancelBid(uint256 loanId) external nonReentrant loanExists(loanId) isNotAccepted(loanId) onlyLender(loanId) {
         Loan storage loan = loans[loanId];
 
-        // Refund escrowed funds to the lender
-        uint256 escrowAmount = escrowedFunds[loanId];
+        // Enforce cooldown period before cancel
+        require(block.timestamp >= bidTimestamps[loanId] + bidCancelPeriod, "bidCancelPeriod not met");
+
+        // Refund escrowed funds to the last bidder (if any)
+        address previousBider = loan.lender;
+        uint256 escrowRefund = escrowedFunds[loanId];
         escrowedFunds[loanId] = 0; // Clear escrow
-        payable(loan.lender).transfer(escrowAmount);
 
         // Clear lender information
         loan.lender = address(0);
         loan.currentInterestRate = loan.maxInterestRate; // Reset to max rate
 
-        emit LoanBidCancelled(loanId, loan.lender);
+        if (previousBider != address(0) && escrowRefund > 0) {
+            payable(previousBider).transfer(escrowRefund);
+        }
 
+        emit LoanBidCancelled(loanId, loan.lender);
     }
 
 
@@ -429,21 +475,24 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
         uint256 totalRepayment = getTotalRepayment(loanId);
 
         // Calculate the lender's protocol fee based on the total repayment
-        uint256 lenderProtocolFee = (totalRepayment * protocolFeeRate) / 10000;
+        uint256 lenderProtocolFee = calculateProtocolFee(totalRepayment);
 
         // Ensure lender sends the correct protocol fee
         require(msg.value == lenderProtocolFee, "Incorrect protocol fee sent");
         
         // Update protocol fee balance
         protocolFeeBalance += lenderProtocolFee;
+        loan.isAccepted = false;
+
+        // Clean up loan data
+        _removeActiveLoan(loanId);
 
         // Transfer NFT to the lender
-        loan.isAccepted = false;
-        IERC721(loan.nftAddress).safeTransferFrom(address(this), loan.lender, loan.tokenId);
-
-        emit LoanDefaulted(loanId, loan.lender);
-
-        _removeActiveLoan(loanId);
+        try IERC721(loan.nftAddress).safeTransferFrom(address(this), loan.lender, loan.tokenId) {
+            emit LoanDefaulted(loanId, loan.lender);
+        } catch {
+            revert("NFT transfer failed"); // Abort on failure
+        }
     }
 
 
