@@ -587,4 +587,41 @@ describe("NFTLendAuctionV1", function () {
     expect(await nftContract.ownerOf(1)).to.equal(lender1.address);
   });
 
+  it("should track and clear collateralization status correctly", async function () {
+    const loanAmount = ethers.utils.parseEther("10");
+
+    // Approve NFT and list as collateral
+    await nftContract.connect(borrower).approve(nftLendAuction.address, 1);
+    await nftLendAuction.connect(borrower).listLoan(nftContract.address, 1, loanAmount, 1000, 604800, 0);
+
+    // Check collateralization status
+    expect(await nftLendAuction.isCollateralized(nftContract.address, 1)).to.be.true;
+
+    // Attempt to list the same NFT again
+    await expect(
+        nftLendAuction.connect(borrower).listLoan(nftContract.address, 1, loanAmount, 1000, 604800, 0)
+    ).to.be.revertedWith("Not NFT owner");
+
+    // Delist the loan
+    await nftLendAuction.connect(borrower).delistLoan(0);
+
+    // Verify collateralization status is cleared
+    expect(await nftLendAuction.isCollateralized(nftContract.address, 1)).to.be.false;
+
+     // List and accept a new loan
+     await nftContract.connect(borrower).approve(nftLendAuction.address, 1);
+     await nftLendAuction.connect(borrower).listLoan(nftContract.address, 1, loanAmount, 1000, 604800, 0);
+     await nftLendAuction.connect(lender1).placeBid(1, 800, { value: loanAmount });
+     await nftLendAuction.connect(borrower).acceptLoan(1);
+ 
+     // Repay the loan
+     const totalRepayment = await nftLendAuction.getTotalRepayment(1);
+     const protocolFee = totalRepayment.mul(200).div(10000);
+     await nftLendAuction.connect(borrower).repayLoan(1, { value: totalRepayment.add(protocolFee) });
+ 
+     // Verify collateralization status is cleared after repayment
+     expect(await nftLendAuction.isCollateralized(nftContract.address, 1)).to.be.false;
+});
+
+
 });
