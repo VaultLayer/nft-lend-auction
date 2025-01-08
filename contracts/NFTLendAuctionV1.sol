@@ -39,6 +39,7 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
     mapping(uint256 => Loan) public loans; // Mapping of loan IDs to loan details
     mapping(uint256 => uint256) public escrowedFunds; // Mapping of loan IDs to escrowed lender funds
     mapping(address => bool) public allowedNFTContracts; // Tracks which NFT contracts are allowed
+    mapping(address => mapping(uint256 => bool)) public isCollateralized;
 
     uint256 public maxActiveLoans = 1000; // Default maximum size for active loans
     uint256[] public activeLoanIds; // List of IDs for currently active loans
@@ -246,6 +247,7 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
             activeLoanIds.length < maxActiveLoans,
             "Active loan limit reached"
         );
+        require(!isCollateralized[nftAddress][tokenId], "NFT is already collateralized");
         require(loanAmount > 0, "Loan amount must be greater than zero");
         require(maxInterestRate > 0, "Interest rate must be greater than zero");
         require(duration > 0, "Loan duration must be greater than zero");
@@ -275,6 +277,9 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
         activeLoanIds.push(loanId);
 
         loanCounter++;
+
+        // Mark NFT as collateralized
+        isCollateralized[nftAddress][tokenId] = true;
 
         // Transfer the NFT to the contract
         try
@@ -388,6 +393,8 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
         // Clean up loan data
         delete loans[loanId];
         _removeActiveLoan(loanId);
+        // Mark NFT as no longer collateralized
+        isCollateralized[loan.nftAddress][loan.tokenId] = false;
 
         // Return the NFT to the borrower
         try
@@ -523,6 +530,9 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
         // Clean up loan data
         loan.isAccepted = false;
         _removeActiveLoan(loanId);
+        // Mark NFT as no longer collateralized
+        isCollateralized[loan.nftAddress][loan.tokenId] = false;
+
         // Add Pending lender payout
         addPendingWithdrawal(loan.lender, lenderPayout);
 
@@ -602,10 +612,12 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
 
         // Update protocol fee balance
         protocolFeeBalance += lenderProtocolFee;
-        loan.isAccepted = false;
 
         // Clean up loan data
+        loan.isAccepted = false;
         _removeActiveLoan(loanId);
+        // Mark NFT as no longer collateralized
+        isCollateralized[loan.nftAddress][loan.tokenId] = false;
 
         // Transfer NFT to the lender
         try
