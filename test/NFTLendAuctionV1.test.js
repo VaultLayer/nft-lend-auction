@@ -1,6 +1,17 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 
+// Helper function to calculate repayment and protocol fees
+async function calculateRepayment(loanAmount, interestRate, protocolFeeRate, nftLendAuction, loanId) {
+  const totalRepayment = await nftLendAuction.getTotalRepayment(loanId);
+  const borrowerProtocolFee = totalRepayment.mul(protocolFeeRate).div(10000);
+  const lenderProtocolFee = totalRepayment.mul(protocolFeeRate).div(10000);
+  const lenderPayout = totalRepayment.sub(lenderProtocolFee);
+  const requiredRepayment = totalRepayment.add(borrowerProtocolFee);
+
+  return { totalRepayment, borrowerProtocolFee, lenderProtocolFee, lenderPayout, requiredRepayment };
+}
+
 describe("NFTLendAuctionV1", function () {
   let NFTLendAuction, nftLendAuction, owner, borrower, lender1, lender2, nftContract, anotherNFTContract;
 
@@ -34,38 +45,71 @@ describe("NFTLendAuctionV1", function () {
     const loanType = 0; // LoanType.FIXED
 
     await expect(
-        nftLendAuction
-            .connect(borrower)
-            .listLoan(nftContract.address, 1, ethers.utils.parseEther("10"), 1000, 604800, loanType)
+      nftLendAuction
+        .connect(borrower)
+        .listLoan(nftContract.address, 1, ethers.utils.parseEther("10"), 1000, 604800, loanType)
     )
-        .to.emit(nftLendAuction, "LoanListed")
-        .withArgs(
-            0,
-            borrower.address,
-            nftContract.address,
-            1,
-            ethers.utils.parseEther("10"),
-            1000,
-            604800,
-            loanType
-        );
+      .to.emit(nftLendAuction, "LoanListed")
+      .withArgs(
+        0,
+        borrower.address,
+        nftContract.address,
+        1,
+        ethers.utils.parseEther("10"),
+        1000,
+        604800,
+        loanType
+      );
 
     const loan = await nftLendAuction.loans(0);
     expect(loan.borrower).to.equal(borrower.address);
     expect(loan.loanAmount).to.equal(ethers.utils.parseEther("10"));
     expect(loan.loanType).to.equal(loanType);
-});
+  });
 
-it("should prevent listing a loan without a valid loanType", async function () {
+  it("should prevent listing a loan without a valid loanType", async function () {
     await nftContract.connect(borrower).approve(nftLendAuction.address, 1);
     const invalidLoanType = 2; // Invalid type, not FIXED or APR
 
     await expect(
-        nftLendAuction
-            .connect(borrower)
-            .listLoan(nftContract.address, 1, ethers.utils.parseEther("10"), 1000, 604800, invalidLoanType)
+      nftLendAuction
+        .connect(borrower)
+        .listLoan(nftContract.address, 1, ethers.utils.parseEther("10"), 1000, 604800, invalidLoanType)
     ).to.be.revertedWithoutReason;
-});
+  });
+
+  it("should prevent withdrawals with zero balance", async function () {
+    await expect(
+      nftLendAuction.connect(lender1).withdrawFunds(lender1.address)
+    ).to.be.revertedWith("No funds to withdraw");
+  });
+
+  it("should handle multiple withdrawals without overpayment", async function () {
+    const loanAmount = ethers.utils.parseEther("10");
+    await nftContract.connect(borrower).approve(nftLendAuction.address, 1);
+    await nftLendAuction.connect(borrower).listLoan(nftContract.address, 1, loanAmount, 1000, 604800, 0);
+
+    await nftLendAuction.connect(lender1).placeBid(0, 800, { value: loanAmount });
+
+    const lenderBalanceBefore = await ethers.provider.getBalance(lender1.address);
+
+    await nftLendAuction.connect(borrower).delistLoan(0);
+
+    const pendingWithdrawal = await nftLendAuction.pendingWithdrawals(lender1.address);
+    expect(pendingWithdrawal).to.equal(loanAmount);
+
+    // Perform first withdrawal
+    const tx1 = await nftLendAuction.connect(lender1).withdrawFunds(lender1.address);
+    const receipt1 = await tx1.wait();
+    const gasUsed1 = receipt1.gasUsed.mul(receipt1.effectiveGasPrice);
+    const lenderBalanceAfterFirst = await ethers.provider.getBalance(lender1.address);
+    expect(lenderBalanceAfterFirst.add(gasUsed1)).to.equal(lenderBalanceBefore.add(loanAmount));
+
+    // Attempt second withdrawal
+    await expect(
+      nftLendAuction.connect(lender1).withdrawFunds(lender1.address)
+    ).to.be.revertedWith("No funds to withdraw");
+  });
 
   it("should prevent a borrower from listing a loan with a disallowed NFT", async function () {
     await anotherNFTContract.connect(borrower).approve(nftLendAuction.address, 1);
@@ -105,7 +149,7 @@ it("should prevent listing a loan without a valid loanType", async function () {
       nftLendAuction.connect(borrower).updateAllowedNFT(nftContract.address, false)
     ).to.be.revertedWithCustomError(nftLendAuction, "AccessControlUnauthorizedAccount");
   });
-  
+
   it("should emit an event when updating the allowed NFT list", async function () {
     await expect(
       nftLendAuction.connect(owner).updateAllowedNFT(nftContract.address, false)
@@ -125,8 +169,16 @@ it("should prevent listing a loan without a valid loanType", async function () {
 
     await nftLendAuction.connect(borrower).delistLoan(0);
 
+    const pendingWithdrawal = await nftLendAuction.pendingWithdrawals(lender1.address);
+    expect(pendingWithdrawal).to.equal(loanAmount);
+
+    const tx = await nftLendAuction.connect(lender1).withdrawFunds(lender1.address);
+    const receipt = await tx.wait();
+    // Calculate gas cost
+    const gasUsed = receipt.gasUsed.mul(receipt.effectiveGasPrice);
+
     const lenderBalanceAfter = await ethers.provider.getBalance(lender1.address);
-    expect(lenderBalanceAfter).to.be.above(lenderBalanceBefore);
+    expect(lenderBalanceAfter.add(gasUsed)).to.equal(lenderBalanceBefore.add(loanAmount));
   });
 
   it("should transfer escrow amount to borrower upon loan acceptance", async function () {
@@ -134,8 +186,8 @@ it("should prevent listing a loan without a valid loanType", async function () {
 
     await nftContract.connect(borrower).approve(nftLendAuction.address, 1);
     await nftLendAuction
-        .connect(borrower)
-        .listLoan(nftContract.address, 1, loanAmount, 1000, 604800, 0);
+      .connect(borrower)
+      .listLoan(nftContract.address, 1, loanAmount, 1000, 604800, 0);
 
     await nftLendAuction.connect(lender1).placeBid(0, 800, { value: loanAmount });
 
@@ -167,15 +219,13 @@ it("should prevent listing a loan without a valid loanType", async function () {
     // First lender places a bid
     await nftLendAuction.connect(lender1).placeBid(0, 900, { value: loanAmount });
 
-    // Track balances before second bid
-    const lender1BalanceBefore = await ethers.provider.getBalance(lender1.address);
+    const pendingBefore = await nftLendAuction.pendingWithdrawals(lender1.address);
+    expect(pendingBefore).to.equal(0);
 
-    // Second lender places a better bid
     await nftLendAuction.connect(lender2).placeBid(0, 800, { value: loanAmount });
 
-    // Validate refund to the first lender
-    const lender1BalanceAfter = await ethers.provider.getBalance(lender1.address);
-    expect(lender1BalanceAfter).to.be.above(lender1BalanceBefore);
+    const pendingAfter = await nftLendAuction.pendingWithdrawals(lender1.address);
+    expect(pendingAfter).to.equal(loanAmount);
   });
 
   it("should allow lenders to cancel bids and refund escrowed funds", async function () {
@@ -209,7 +259,7 @@ it("should prevent listing a loan without a valid loanType", async function () {
     await nftLendAuction.connect(lender1).placeBid(0, 800, { value: loanAmount });
 
     await expect(
-        nftLendAuction.connect(lender2).cancelBid(0)
+      nftLendAuction.connect(lender2).cancelBid(0)
     ).to.be.revertedWith("Not loan lender");
   });
 
@@ -222,96 +272,92 @@ it("should prevent listing a loan without a valid loanType", async function () {
     await nftLendAuction.connect(borrower).acceptLoan(0);
 
     await expect(
-        nftLendAuction.connect(lender1).cancelBid(0)
+      nftLendAuction.connect(lender1).cancelBid(0)
     ).to.be.revertedWith("Loan already accepted");
   });
-  
-  it("should repay the lender and reclaim NFT upon loan repayment", async function () {
+
+  it("should allow funds withdrawal by lender after repayment", async function () {
     const loanAmount = ethers.utils.parseEther("10");
     const interestRate = 800; // 8% interest rate
     const protocolFeeRate = 200; // 2% protocol fee
 
-    // Calculate repayment details
-    const interestAmount = loanAmount.mul(interestRate).div(10000); // Principal * Rate / 10000
-    const totalRepayment = loanAmount.add(interestAmount); // Total repayment = Principal + Interest
-    const borrowerProtocolFee = totalRepayment.mul(protocolFeeRate).div(10000); // Total repayment * Protocol Fee Rate
-    const lenderProtocolFee = totalRepayment.mul(protocolFeeRate).div(10000); // Total repayment * Protocol Fee Rate
-    const lenderPayout = totalRepayment.sub(lenderProtocolFee); // Lender payout = Total repayment - Lender's protocol fee
-
     await nftContract.connect(borrower).approve(nftLendAuction.address, 1);
     await nftLendAuction
-        .connect(borrower)
-        .listLoan(nftContract.address, 1, loanAmount, 1000, 604800, 0); // LoanType.FIXED
+      .connect(borrower)
+      .listLoan(nftContract.address, 1, loanAmount, 1000, 604800, 0); // LoanType.FIXED
 
     await nftLendAuction.connect(lender1).placeBid(0, interestRate, { value: loanAmount });
     await nftLendAuction.connect(borrower).acceptLoan(0);
 
-    const lenderBalanceBefore = await ethers.provider.getBalance(lender1.address);
+    // Calculate repayment details
+    const { totalRepayment, borrowerProtocolFee, lenderProtocolFee, lenderPayout, requiredRepayment } =
+    await calculateRepayment(loanAmount, interestRate, protocolFeeRate, nftLendAuction, 0);
 
     // Borrower repays the loan
     await nftLendAuction.connect(borrower).repayLoan(0, { value: totalRepayment.add(borrowerProtocolFee) });
 
-    const lenderBalanceAfter = await ethers.provider.getBalance(lender1.address);
-
-    // Verify lender received the repayment minus protocol fee
-    expect(lenderBalanceAfter.sub(lenderBalanceBefore)).to.equal(lenderPayout);
-
     // Verify NFT ownership returned to borrower
     expect(await nftContract.ownerOf(1)).to.equal(borrower.address);
-});
+
+    const pendingWithdrawal = await nftLendAuction.pendingWithdrawals(lender1.address);
+    expect(pendingWithdrawal).to.equal(lenderPayout);
+
+    const lenderBalanceBefore = await ethers.provider.getBalance(lender1.address);
+    const tx = await nftLendAuction.connect(lender1).withdrawFunds(lender1.address);
+    const receipt = await tx.wait();
+    const gasUsed = receipt.gasUsed.mul(receipt.effectiveGasPrice);
+
+    const lenderBalanceAfter = await ethers.provider.getBalance(lender1.address);
+    expect(lenderBalanceAfter.add(gasUsed)).to.equal(lenderBalanceBefore.add(lenderPayout));
+
+    const finalPending = await nftLendAuction.pendingWithdrawals(lender1.address);
+    expect(finalPending).to.equal(0);
+  });
 
 
+  it("should require lender to pay protocol fee upon claiming a defaulted loan", async function () {
+    const loanAmount = ethers.utils.parseEther("10");
+    const interestRate = 800; // 8% interest
+    const protocolFeeRate = 200; // 2% protocol fee
 
-it("should require lender to pay protocol fee upon claiming a defaulted loan", async function () {
-  const loanAmount = ethers.utils.parseEther("10");
-  const interestRate = 800; // 8% interest
-  const protocolFeeRate = 200; // 2% protocol fee
-
-  // Calculate total repayment and lender's protocol fee
-  const repaymentAmount = loanAmount.add(loanAmount.mul(interestRate).div(10000)); // Principal + Interest
-  const lenderProtocolFee = repaymentAmount.mul(protocolFeeRate).div(10000); // Total Repayment * Protocol Fee Rate
-
-  await nftContract.connect(borrower).approve(nftLendAuction.address, 1);
-  await nftLendAuction
+    await nftContract.connect(borrower).approve(nftLendAuction.address, 1);
+    await nftLendAuction
       .connect(borrower)
       .listLoan(nftContract.address, 1, loanAmount, 1000, 2, 0); // 2 seconds duration, LoanType.FIXED
 
-  await nftLendAuction.connect(lender1).placeBid(0, interestRate, { value: loanAmount });
-  await nftLendAuction.connect(borrower).acceptLoan(0);
+    await nftLendAuction.connect(lender1).placeBid(0, interestRate, { value: loanAmount });
+    await nftLendAuction.connect(borrower).acceptLoan(0);
 
-  // Advance time beyond the loan duration
-  await ethers.provider.send("evm_increaseTime", [3]);
-  await ethers.provider.send("evm_mine", []);
+    // Calculate total repayment and lender's protocol fee
+    const { totalRepayment, borrowerProtocolFee, lenderProtocolFee, lenderPayout, requiredRepayment } =
+      await calculateRepayment(loanAmount, interestRate, protocolFeeRate, nftLendAuction, 0);
 
-  // Lender claims the defaulted loan
-  await expect(
+
+    // Advance time beyond the loan duration
+    await ethers.provider.send("evm_increaseTime", [3]);
+    await ethers.provider.send("evm_mine", []);
+
+    // Lender claims the defaulted loan
+    await expect(
       nftLendAuction.connect(lender1).claimDefaultedLoan(0, {
-          value: lenderProtocolFee,
+        value: lenderProtocolFee,
       })
-  )
+    )
       .to.emit(nftLendAuction, "LoanDefaulted")
       .withArgs(0, lender1.address);
 
-  // Verify protocol fee balance updated
-  const protocolFeeBalance = await nftLendAuction.protocolFeeBalance();
-  expect(protocolFeeBalance).to.equal(lenderProtocolFee);
+    // Verify protocol fee balance updated
+    const protocolFeeBalance = await nftLendAuction.protocolFeeBalance();
+    expect(protocolFeeBalance).to.equal(lenderProtocolFee);
 
-  // Verify NFT transferred to lender
-  expect(await nftContract.ownerOf(1)).to.equal(lender1.address);
-});
-
-
+    // Verify NFT transferred to lender
+    expect(await nftContract.ownerOf(1)).to.equal(lender1.address);
+  });
 
   it("should correctly track active loans", async function () {
     const loanAmount = ethers.utils.parseEther("10");
     const interestRate = 800; // 8% interest rate
     const protocolFeeRate = 200; // 2% protocol fee
-
-    // Calculate repayment details
-    const interestAmount = loanAmount.mul(interestRate).div(10000); // Interest = loanAmount * rate / 10000
-    const totalRepayment = loanAmount.add(interestAmount); // Total repayment = principal + interest
-    const borrowerProtocolFee = totalRepayment.mul(protocolFeeRate).div(10000); // Borrower's protocol fee
-    const requiredRepayment = totalRepayment.add(borrowerProtocolFee); // Total payment required from borrower
 
     // Approve and list two loans
     await nftContract.connect(borrower).approve(nftLendAuction.address, 1);
@@ -319,11 +365,11 @@ it("should require lender to pay protocol fee upon claiming a defaulted loan", a
     await nftContract.connect(borrower).approve(nftLendAuction.address, 2);
 
     await nftLendAuction
-        .connect(borrower)
-        .listLoan(nftContract.address, 1, loanAmount, 1000, 604800, 0); // Loan 1
+      .connect(borrower)
+      .listLoan(nftContract.address, 1, loanAmount, 1000, 604800, 0); // Loan 1
     await nftLendAuction
-        .connect(borrower)
-        .listLoan(nftContract.address, 2, ethers.utils.parseEther("20"), 1000, 604800, 0); // Loan 2
+      .connect(borrower)
+      .listLoan(nftContract.address, 2, ethers.utils.parseEther("20"), 1000, 604800, 0); // Loan 2
 
     // Verify both loans are active
     let activeLoans = await nftLendAuction.getActiveLoans();
@@ -334,6 +380,10 @@ it("should require lender to pay protocol fee upon claiming a defaulted loan", a
     await nftLendAuction.connect(borrower).acceptLoan(0);
 
     // Repay the first loan
+    // Calculate total repayment and lender's protocol fee
+    const { totalRepayment, borrowerProtocolFee, lenderProtocolFee, lenderPayout, requiredRepayment } =
+      await calculateRepayment(loanAmount, interestRate, protocolFeeRate, nftLendAuction, 0);
+
     await nftLendAuction.connect(borrower).repayLoan(0, { value: requiredRepayment });
 
     // Verify only one loan is active
@@ -344,48 +394,39 @@ it("should require lender to pay protocol fee upon claiming a defaulted loan", a
     expect(activeLoans[0].toNumber()).to.equal(1);
   });
 
-  it("should repay the lender and reclaim NFT upon loan repayment", async function () {
+  it("should act as a circuit breaker when max loans is set to zero", async function () {
     const loanAmount = ethers.utils.parseEther("10");
-    const interestRate = 800; // 8% interest
-    const protocolFeeRate = 200; // 2% protocol fee
 
     await nftContract.connect(borrower).approve(nftLendAuction.address, 1);
 
-    // Borrower lists the loan
-    await nftLendAuction
-        .connect(borrower)
-        .listLoan(nftContract.address, 1, loanAmount, 1000, 604800, 0); // LoanType.FIXED
+    // Set max active loans to zero
+    await nftLendAuction.connect(owner).setMaxActiveLoans(0);
 
-    // Lender places a bid
-    await nftLendAuction.connect(lender1).placeBid(0, interestRate, { value: loanAmount });
+    await expect(
+      nftLendAuction.connect(borrower).listLoan(nftContract.address, 1, loanAmount, 1000, 604800, 0)
+    ).to.be.revertedWith("Active loan limit reached");
+  });
 
-    // Borrower accepts the loan
-    await nftLendAuction.connect(borrower).acceptLoan(0);
+  it("should enforce max active loans limit", async function () {
+    const loanAmount = ethers.utils.parseEther("10");
 
-    const lenderBalanceBefore = await ethers.provider.getBalance(lender1.address);
+    await nftContract.connect(borrower).approve(nftLendAuction.address, 1);
 
-    // Fetch total repayment and protocol fee details from the contract
-    const totalRepayment = await nftLendAuction.getTotalRepayment(0);
-    const borrowerProtocolFee = totalRepayment.mul(protocolFeeRate).div(10000);
-    const lenderProtocolFee = totalRepayment.mul(protocolFeeRate).div(10000);
+    // Set max active loans to 5
+    await nftLendAuction.connect(owner).setMaxActiveLoans(5);
 
-    const requiredRepayment = totalRepayment.add(borrowerProtocolFee);
+    for (let i = 0; i < 5; i++) {
+      await nftContract.connect(borrower).mint(); // Mint new NFT for each loan
+      await nftContract.connect(borrower).approve(nftLendAuction.address, i + 1);
+      await nftLendAuction.connect(borrower).listLoan(nftContract.address, i + 1, loanAmount, 1000, 604800, 0);
+    }
 
-    // Borrower repays the loan
-    const tx = await nftLendAuction.connect(borrower).repayLoan(0, { value: requiredRepayment });
-    const receipt = await tx.wait();
-    const gasUsed = receipt.gasUsed;
-    const gasPrice = tx.gasPrice || (await ethers.provider.getGasPrice());
-    const gasCost = gasUsed.mul(gasPrice);
-
-    const lenderBalanceAfter = await ethers.provider.getBalance(lender1.address);
-
-    // Verify lender received the repayment minus protocol fee
-    expect(lenderBalanceAfter.sub(lenderBalanceBefore)).to.equal(totalRepayment.sub(lenderProtocolFee));
-
-    // Verify NFT ownership returned to borrower
-    expect(await nftContract.ownerOf(1)).to.equal(borrower.address);
-
+    // Attempt to exceed max loans
+    await nftContract.connect(borrower).mint();
+    await nftContract.connect(borrower).approve(nftLendAuction.address, 6);
+    await expect(
+      nftLendAuction.connect(borrower).listLoan(nftContract.address, 6, loanAmount, 1000, 604800, 0)
+    ).to.be.revertedWith("Active loan limit reached");
   });
 
   it("should allow the owner to update the protocol fee rate", async function () {
@@ -402,7 +443,6 @@ it("should require lender to pay protocol fee upon claiming a defaulted loan", a
     ).to.be.revertedWithCustomError(nftLendAuction, "AccessControlUnauthorizedAccount");
   });
 
-
   it("should allow the owner to withdraw accumulated protocol fees", async function () {
     const ownerBalanceBefore = await ethers.provider.getBalance(owner.address);
     const protocolFeeBalance = await nftLendAuction.protocolFeeBalance();
@@ -414,7 +454,7 @@ it("should require lender to pay protocol fee upon claiming a defaulted loan", a
     const ownerBalanceAfter = await ethers.provider.getBalance(owner.address);
 
     expect(ownerBalanceAfter).to.equal(
-        ownerBalanceBefore.add(protocolFeeBalance).sub(gasCost)
+      ownerBalanceBefore.add(protocolFeeBalance).sub(gasCost)
     ); // Account for gas costs
   });
 
@@ -434,8 +474,8 @@ it("should require lender to pay protocol fee upon claiming a defaulted loan", a
 
     // Borrower lists the loan
     await nftLendAuction
-        .connect(borrower)
-        .listLoan(nftContract.address, 1, loanAmount, 1500, 604800, 1); // LoanType.APR
+      .connect(borrower)
+      .listLoan(nftContract.address, 1, loanAmount, 1500, 604800, 1); // LoanType.APR
 
     // Lender places a bid
     await nftLendAuction.connect(lender1).placeBid(0, interestRate, { value: loanAmount });
@@ -443,113 +483,108 @@ it("should require lender to pay protocol fee upon claiming a defaulted loan", a
     // Borrower accepts the loan
     await nftLendAuction.connect(borrower).acceptLoan(0);
 
-    const lenderBalanceBefore = await ethers.provider.getBalance(lender1.address);
-
     // Advance time within the loan duration
     await ethers.provider.send("evm_increaseTime", [5 * 24 * 60 * 60]); // 5 days (within duration)
     await ethers.provider.send("evm_mine", []);
 
     // Fetch total repayment and protocol fee details from the contract
-    const totalRepayment = await nftLendAuction.getTotalRepayment(0);
-    const borrowerProtocolFee = totalRepayment.mul(protocolFeeRate).div(10000);
-    const lenderProtocolFee = totalRepayment.mul(protocolFeeRate).div(10000);
-
-    const requiredRepayment = totalRepayment.add(borrowerProtocolFee);
+    const { totalRepayment, borrowerProtocolFee, lenderProtocolFee, lenderPayout, requiredRepayment } =
+      await calculateRepayment(loanAmount, interestRate, protocolFeeRate, nftLendAuction, 0);
 
     // Borrower repays the loan
-    const tx = await nftLendAuction.connect(borrower).repayLoan(0, { value: requiredRepayment });
+    await nftLendAuction.connect(borrower).repayLoan(0, { value: requiredRepayment });
+    
+    const pendingWithdrawal = await nftLendAuction.pendingWithdrawals(lender1.address);
+    expect(pendingWithdrawal).to.equal(lenderPayout);
+
+    const lenderBalanceBefore = await ethers.provider.getBalance(lender1.address);
+    const tx = await nftLendAuction.connect(lender1).withdrawFunds(lender1.address);
+    const receipt = await tx.wait();
+    const gasUsed = receipt.gasUsed.mul(receipt.effectiveGasPrice);
+
+    const lenderBalanceAfter = await ethers.provider.getBalance(lender1.address);
+    expect(lenderBalanceAfter.add(gasUsed)).to.equal(lenderBalanceBefore.add(lenderPayout));
+
+    // Verify NFT ownership returned to borrower
+    expect(await nftContract.ownerOf(1)).to.equal(borrower.address);
+  });
+
+  it("should calculate a minimum interest of one day for early APR loan repayment", async function () {
+    const loanAmount = ethers.utils.parseEther("10");
+    const interestRate = 1200; // 12% annual interest
+    const protocolFeeRate = 200; // 2% protocol fee
+
+    await nftContract.connect(borrower).approve(nftLendAuction.address, 1);
+
+    // Borrower lists the loan
+    await nftLendAuction
+      .connect(borrower)
+      .listLoan(nftContract.address, 1, loanAmount, 1500, 604800, 1); // LoanType.APR
+
+    // Lender places a bid
+    await nftLendAuction.connect(lender1).placeBid(0, interestRate, { value: loanAmount });
+
+    // Borrower accepts the loan
+    await nftLendAuction.connect(borrower).acceptLoan(0);
+
+    // Fetch total repayment and protocol fee details from the contract
+    const { totalRepayment, borrowerProtocolFee, lenderProtocolFee, lenderPayout, requiredRepayment } =
+      await calculateRepayment(loanAmount, interestRate, protocolFeeRate, nftLendAuction, 0);
+
+
+    // Borrower repays the loan immediately
+    await nftLendAuction.connect(borrower).repayLoan(0, { value: requiredRepayment });
+    
+    const pendingWithdrawal = await nftLendAuction.pendingWithdrawals(lender1.address);
+    expect(pendingWithdrawal).to.equal(lenderPayout);
+
+    const lenderBalanceBefore = await ethers.provider.getBalance(lender1.address);
+    const tx = await nftLendAuction.connect(lender1).withdrawFunds(lender1.address);
+    const receipt = await tx.wait();
+    const gasUsed = receipt.gasUsed.mul(receipt.effectiveGasPrice);
+
+    const lenderBalanceAfter = await ethers.provider.getBalance(lender1.address);
+    expect(lenderBalanceAfter.add(gasUsed)).to.equal(lenderBalanceBefore.add(lenderPayout));
+
+    // Verify NFT ownership returned to borrower
+    expect(await nftContract.ownerOf(1)).to.equal(borrower.address);
+  });
+
+  it("should allow lender to claim NFT on APR loan default", async function () {
+    const loanAmount = ethers.utils.parseEther("10");
+    const interestRate = 1200; // 12% annual interest
+    const protocolFeeRate = 200; // 2% protocol fee
+
+    await nftContract.connect(borrower).approve(nftLendAuction.address, 1);
+
+    // Borrower lists the loan
+    await nftLendAuction
+      .connect(borrower)
+      .listLoan(nftContract.address, 1, loanAmount, 1500, 604800, 1); // LoanType.APR
+
+    // Lender places a bid
+    await nftLendAuction.connect(lender1).placeBid(0, interestRate, { value: loanAmount });
+
+    // Borrower accepts the loan
+    await nftLendAuction.connect(borrower).acceptLoan(0);
+
+    // Simulate loan default (advance time beyond loan duration)
+    await ethers.provider.send("evm_increaseTime", [604800 + 1]); // 7 days + 1 second
+    await ethers.provider.send("evm_mine", []);
+
+    const { totalRepayment, borrowerProtocolFee, lenderProtocolFee, lenderPayout, requiredRepayment } =
+      await calculateRepayment(loanAmount, interestRate, protocolFeeRate, nftLendAuction, 0);
+
+
+    // Lender claims NFT
+    const tx = await nftLendAuction.connect(lender1).claimDefaultedLoan(0, { value: lenderProtocolFee });
     const receipt = await tx.wait();
     const gasUsed = receipt.gasUsed;
     const gasPrice = tx.gasPrice || (await ethers.provider.getGasPrice());
     const gasCost = gasUsed.mul(gasPrice);
 
-    const lenderBalanceAfter = await ethers.provider.getBalance(lender1.address);
+    // Verify NFT ownership transferred to lender
+    expect(await nftContract.ownerOf(1)).to.equal(lender1.address);
+  });
 
-    // Verify lender received the repayment minus protocol fee
-    expect(lenderBalanceAfter.sub(lenderBalanceBefore)).to.equal(totalRepayment.sub(lenderProtocolFee));
-
-    // Verify NFT ownership returned to borrower
-    expect(await nftContract.ownerOf(1)).to.equal(borrower.address);
-});
-
-it("should calculate a minimum interest of one day for early APR loan repayment", async function () {
-  const loanAmount = ethers.utils.parseEther("10");
-  const interestRate = 1200; // 12% annual interest
-  const protocolFeeRate = 200; // 2% protocol fee
-
-  await nftContract.connect(borrower).approve(nftLendAuction.address, 1);
-
-  // Borrower lists the loan
-  await nftLendAuction
-      .connect(borrower)
-      .listLoan(nftContract.address, 1, loanAmount, 1500, 604800, 1); // LoanType.APR
-
-  // Lender places a bid
-  await nftLendAuction.connect(lender1).placeBid(0, interestRate, { value: loanAmount });
-
-  // Borrower accepts the loan
-  await nftLendAuction.connect(borrower).acceptLoan(0);
-
-  const lenderBalanceBefore = await ethers.provider.getBalance(lender1.address);
-
-  // Fetch total repayment and protocol fee details from the contract
-  const totalRepayment = await nftLendAuction.getTotalRepayment(0);
-  const borrowerProtocolFee = totalRepayment.mul(protocolFeeRate).div(10000);
-  const lenderProtocolFee = totalRepayment.mul(protocolFeeRate).div(10000);
-
-  const requiredRepayment = totalRepayment.add(borrowerProtocolFee);
-
-  // Borrower repays the loan immediately
-  const tx = await nftLendAuction.connect(borrower).repayLoan(0, { value: requiredRepayment });
-  const receipt = await tx.wait();
-  const gasUsed = receipt.gasUsed;
-  const gasPrice = tx.gasPrice || (await ethers.provider.getGasPrice());
-  const gasCost = gasUsed.mul(gasPrice);
-
-  const lenderBalanceAfter = await ethers.provider.getBalance(lender1.address);
-
-  // Verify lender received the repayment minus protocol fee
-  expect(lenderBalanceAfter.sub(lenderBalanceBefore)).to.equal(totalRepayment.sub(lenderProtocolFee));
-
-  // Verify NFT ownership returned to borrower
-  expect(await nftContract.ownerOf(1)).to.equal(borrower.address);
-});
-
-it("should allow lender to claim NFT on APR loan default", async function () {
-  const loanAmount = ethers.utils.parseEther("10");
-  const interestRate = 1200; // 12% annual interest
-  const protocolFeeRate = 200; // 2% protocol fee
-
-  await nftContract.connect(borrower).approve(nftLendAuction.address, 1);
-
-  // Borrower lists the loan
-  await nftLendAuction
-      .connect(borrower)
-      .listLoan(nftContract.address, 1, loanAmount, 1500, 604800, 1); // LoanType.APR
-
-  // Lender places a bid
-  await nftLendAuction.connect(lender1).placeBid(0, interestRate, { value: loanAmount });
-
-  // Borrower accepts the loan
-  await nftLendAuction.connect(borrower).acceptLoan(0);
-
-  // Simulate loan default (advance time beyond loan duration)
-  await ethers.provider.send("evm_increaseTime", [604800 + 1]); // 7 days + 1 second
-  await ethers.provider.send("evm_mine", []);
-
-  const totalRepayment = await nftLendAuction.getTotalRepayment(0);
-  const lenderProtocolFee = totalRepayment.mul(protocolFeeRate).div(10000);
-
-  // Lender claims NFT
-  const tx = await nftLendAuction.connect(lender1).claimDefaultedLoan(0, { value: lenderProtocolFee });
-  const receipt = await tx.wait();
-  const gasUsed = receipt.gasUsed;
-  const gasPrice = tx.gasPrice || (await ethers.provider.getGasPrice());
-  const gasCost = gasUsed.mul(gasPrice);
-
-  // Verify NFT ownership transferred to lender
-  expect(await nftContract.ownerOf(1)).to.equal(lender1.address);
-});
-
-  
 });
