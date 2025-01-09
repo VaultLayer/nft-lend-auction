@@ -50,6 +50,7 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
 
     // Refund handling
     mapping(address => uint256) public pendingWithdrawals;
+    uint256 public totalPendingWithdrawals; // Accumulated pending withdrawals
 
     // Add bid cooldown period
     mapping(uint256 => uint256) public bidTimestamps; // Timestamp for the last bid placed
@@ -102,7 +103,11 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
 
     event BidCancelPeriodUpdated(uint256 newBidCancelPeriod);
 
-    event FundsWithdrawn(address indexed user, uint256 amount, address indexed to);
+    event FundsWithdrawn(
+        address indexed user,
+        uint256 amount,
+        address indexed to
+    );
 
     // Modifiers
     modifier onlyBorrower(uint256 loanId) {
@@ -166,27 +171,34 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
      * @param nftAddress Address of the NFT contract.
      * @param allowed Whether the NFT contract is allowed.
      */
-    function updateAllowedNFT(address nftAddress, bool allowed) external onlyRole(MANAGER_ROLE) {
+    function updateAllowedNFT(
+        address nftAddress,
+        bool allowed
+    ) external onlyRole(MANAGER_ROLE) {
         require(nftAddress != address(0), "Invalid NFT address");
         require(nftAddress.code.length > 0, "Address is not a contract");
 
         // Check if the contract supports ERC721 interface
-        try IERC721(nftAddress).supportsInterface(0x80ac58cd) returns (bool isERC721) {
+        try IERC721(nftAddress).supportsInterface(0x80ac58cd) returns (
+            bool isERC721
+        ) {
             require(isERC721, "Contract does not support ERC721 interface");
         } catch {
             revert("Failed to verify ERC721 interface");
         }
 
         // Verify the presence of 'safeTransferFrom(address,address,uint256)'
-        bytes4 safeTransferSelector = bytes4(keccak256("safeTransferFrom(address,address,uint256)"));
-        require(nftAddress.code.length > 0 && safeTransferSelector != bytes4(0), "Contract lacks safeTransferFrom");
-
+        bytes4 safeTransferSelector = bytes4(
+            keccak256("safeTransferFrom(address,address,uint256)")
+        );
+        require(
+            nftAddress.code.length > 0 && safeTransferSelector != bytes4(0),
+            "Contract lacks safeTransferFrom"
+        );
 
         allowedNFTContracts[nftAddress] = allowed;
         emit AllowedNFTUpdated(nftAddress, allowed);
     }
-
-
 
     // Admin can revoke roles from other addresses
     function revokeManagerRole(
@@ -247,7 +259,10 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
             activeLoanIds.length < maxActiveLoans,
             "Active loan limit reached"
         );
-        require(!isCollateralized[nftAddress][tokenId], "NFT is already collateralized");
+        require(
+            !isCollateralized[nftAddress][tokenId],
+            "NFT is already collateralized"
+        );
         require(loanAmount > 0, "Loan amount must be greater than zero");
         require(maxInterestRate > 0, "Interest rate must be greater than zero");
         require(duration > 0, "Loan duration must be greater than zero");
@@ -308,6 +323,7 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
      */
     function addPendingWithdrawal(address recipient, uint256 amount) internal {
         pendingWithdrawals[recipient] += amount;
+        totalPendingWithdrawals += amount; // Update global pending withdrawals
     }
 
     /**
@@ -322,6 +338,7 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
         require(amount > 0, "No funds to withdraw");
 
         pendingWithdrawals[msg.sender] = 0;
+        totalPendingWithdrawals -= amount; // Deduct from global pending withdrawals
         payable(to).transfer(amount);
 
         emit FundsWithdrawn(msg.sender, amount, to);
@@ -659,25 +676,10 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
     }
 
     /**
-     * @notice Withdraws accumulated protocol fees to the specified address.
+     * @notice Withdraws accumulated protocol fees and excess ETH to the specified address.
      * @param to Address to receive the fees.
      */
     function withdrawProtocolFees(
-        address payable to
-    ) external nonReentrant onlyRole(OWNER_ROLE) {
-        require(to != address(0), "Invalid recipient address");
-        uint256 amount = protocolFeeBalance;
-
-        protocolFeeBalance = 0;
-
-        (bool success, ) = to.call{value: amount}("");
-        require(success, "Withdrawal failed");
-
-        emit ProtocolFeesWithdrawn(to, amount);
-    }
-
-    // Withdraw locked Ether sent to the contract by mistake
-    function withdrawEther(
         address payable to
     ) external nonReentrant onlyRole(OWNER_ROLE) {
         require(to != address(0), "Invalid recipient address");
@@ -685,21 +687,25 @@ contract NFTLendAuctionV1 is ReentrancyGuard, AccessControl {
         // Calculate the total balance held by the contract
         uint256 totalBalance = address(this).balance;
 
-        // Calculate total escrowed funds (sum of all values in escrowedFunds mapping)
+        // Calculate total escrowed funds
         uint256 totalEscrowedFunds = 0;
         for (uint256 i = 0; i < activeLoanIds.length; i++) {
             totalEscrowedFunds += escrowedFunds[activeLoanIds[i]];
         }
 
-        // Calculate withdrawable amount:
+        // Calculate withdrawable amount: (protocol fees + excess funds)
         uint256 withdrawableAmount = totalBalance -
             totalEscrowedFunds -
-            protocolFeeBalance;
+            totalPendingWithdrawals; // Use global pending withdrawals
+
         require(withdrawableAmount > 0, "No funds available for withdrawal");
+
+        // Reset protocol fees (if any were included in the balance)
+        protocolFeeBalance = 0;
 
         // Perform the withdrawal
         (bool success, ) = to.call{value: withdrawableAmount}("");
-        require(success, "Ether transfer failed");
+        require(success, "Withdrawal failed");
 
         emit ProtocolFeesWithdrawn(to, withdrawableAmount);
     }
