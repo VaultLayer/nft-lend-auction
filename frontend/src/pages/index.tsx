@@ -44,6 +44,7 @@ export default function Home() {
         durationDays: "", // Input duration in days
         loanType: "" // 0 for Fixed, 1 for APR
     });
+    const [pendingWithdrawals, setPendingWithdrawals] = useState<string>("0");
     const [openModal, setOpenModal] = useState(false);
 
 
@@ -106,7 +107,28 @@ export default function Home() {
     useEffect(() => {
         fetchLoans();
     }, []); // Fetch loans when the component mounts
+
+    useEffect(() => {
+        if (walletAddress) fetchLoans();
+    }, [walletAddress]);
   
+    const fetchPendingWithdrawals = async () => {
+        try {
+            // Use the RPC provider instead of a signer
+            const provider = new ethers.providers.JsonRpcProvider(process.env.NEXT_PUBLIC_RPC_URL);
+            const contract = getContract(provider);
+    
+            const amount = await contract.pendingWithdrawals(walletAddress);
+            setPendingWithdrawals(ethers.utils.formatEther(amount));
+        } catch (error) {
+            console.error("Error fetching pending withdrawals:", error);
+        }
+    };
+
+    useEffect(() => {
+        if (walletAddress) fetchPendingWithdrawals();
+    }, [walletAddress]);
+
     
     const connectWallet = async () => {
         try {
@@ -388,10 +410,21 @@ export default function Home() {
         }
     };
     
+    const handleWithdrawFunds = async () => {
+        try {
+            if (!signer) return;
 
-    useEffect(() => {
-        if (walletAddress) fetchLoans();
-    }, [walletAddress]);
+            const contract = getContract(signer);
+            const tx = await contract.withdrawFunds(walletAddress);
+            await tx.wait();
+
+            alert("Funds withdrawn successfully!");
+            fetchPendingWithdrawals();
+        } catch (error) {
+            console.error("Error withdrawing funds:", error);
+        }
+    };
+
 
     return (
         <Container>
@@ -412,6 +445,29 @@ export default function Home() {
                 </Box>
             )}
 
+
+            {walletAddress && (
+                <Box sx={{ marginTop: 4 }}>
+                    <Typography variant="h5">Pending Withdrawals</Typography>
+                    <Card sx={{ marginBottom: 2 }}>
+                        <CardContent>
+                            <Typography>
+                                Pending Amount: {pendingWithdrawals} $CORE
+                            </Typography>
+                        </CardContent>
+                        <CardActions>
+                            <Button
+                                variant="contained"
+                                color="primary"
+                                disabled={parseFloat(pendingWithdrawals) === 0}
+                                onClick={handleWithdrawFunds}
+                            >
+                                Withdraw Funds
+                            </Button>
+                        </CardActions>
+                    </Card>
+                </Box>
+            )}
 
             <Button variant="contained" onClick={() => setOpenModal(true)} sx={{ marginTop: 2 }}>
                 List New Loan
